@@ -1,0 +1,3 @@
+[submodule "plugins/dependencies/panda/panda-wrapper"]
+	path = plugins/dependencies/panda/panda-wrapper
+	url = https://github.com/panda-re/panda
