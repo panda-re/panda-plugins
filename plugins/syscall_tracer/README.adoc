@@ -1,0 +1,33 @@
+Syscall Tracer Schema
+=====================
+TODO documentation 
+
+
+SystemCall
+  - Syscall ID
+  - Name
+  - Number_of_args
+
+Type:
+  - Name
+
+IoType:
+  - Name
+
+SyscallInvocation
+  - PID
+  - ASID
+  - TID
+  - EntryPoint (Boolean)
+  - ReturnValue (Optional)
+  - Instruction Count
+  - SystemCall
+  - List<Arguments>
+
+Argument:
+  - Type
+  - IoType
+  - Value
+  - Position
+  - Description (Json)
+

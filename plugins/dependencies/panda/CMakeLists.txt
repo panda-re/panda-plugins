@@ -24,6 +24,8 @@ ExternalProject_Add(panda-ext
     SOURCE_DIR        "${PROJECT_SOURCE_DIR}/panda-wrapper"
     BINARY_DIR        "${CMAKE_BINARY_DIR}/panda-internal-build"
     INSTALL_DIR       "${CMAKE_INSTALL_PREFIX}"
+    UPDATE_COMMAND    echo "callstack_instr\\nosi\\nosi_linux\\nstringsearch" > panda/plugins/config.panda
+    COMMAND           echo "" > panda/plugins/config.llvm.panda
     CONFIGURE_COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/panda-wrapper/configure --target-list=x86_64-softmmu,i386-softmmu,arm-softmmu,aarch64-softmmu,ppc-softmmu,mips-softmmu,mipsel-softmmu --enable-llvm --with-llvm=/usr/lib/llvm-11 --prefix=${CMAKE_INSTALL_PREFIX}
     
     BUILD_COMMAND make ${EP_BUILD_ACCEL_FLAG}
