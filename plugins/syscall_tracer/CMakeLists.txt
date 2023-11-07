@@ -12,7 +12,7 @@ set(SRC_FILES ${PANDA_PLUGIN_NAME}.cc
                         reporting/reporting.cc
                         reporting/sqlite_model.cc)
 
-set(LINK_LIBS sqlite3 libosi liboffset libiohal)
+set(LINK_LIBS -lsqlite3 -losi -loffset -liohal)
 set(LINK_LIBS_I386 ${LINK_LIBS}  
         panda_support_typesignature-i386 
         panda_ipanda-i386)

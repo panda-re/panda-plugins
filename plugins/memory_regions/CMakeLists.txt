@@ -5,7 +5,7 @@ add_definitions(-DNEED_CPU_H)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -std=c++11")
 
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
-set(LINK_LIBS -lavro libosi libiohal liboffset)
+set(LINK_LIBS -lavro -losi -liohal -loffset)
 
 set(SRC_FILES ${PANDA_PLUGIN_NAME}.cpp
               region.cpp)
