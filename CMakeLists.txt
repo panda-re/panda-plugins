@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+find_package(PkgConfig REQUIRED)
 include(ExternalProject)
 
 ExternalProject_Add(panda-ext
@@ -26,3 +27,6 @@ install(DIRECTORY ${CMAKE_BINARY_DIR}/release/
         USE_SOURCE_PERMISSIONS
         PATTERN "CSV" EXCLUDE
         )
+
+
+include(CPackConfig.txt)
