@@ -1,7 +1,6 @@
 # PANDA plugins
 
-This repo is a prototype that builds PANDA's plugins out of tree.
-
+This repo is a prototype that builds PANDA's plugins out of tree. This assumed that you have `libosi` already installed system wide. (Check out and build them [here](https://github.com/panda-re/libosi/tree/master))
 
 ## Download and Build
 ```bash
