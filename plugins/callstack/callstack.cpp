@@ -13,10 +13,10 @@
 PANDAENDCOMMENT */
 #define __STDC_FORMAT_MACROS
 
-#include <distorm.h>
+#include <distorm3/distorm.h>
 namespace distorm
 {
-#include <mnemonics.h>
+#include <distorm3/mnemonics.h>
 }
 
 #include <stdio.h>

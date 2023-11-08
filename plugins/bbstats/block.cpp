@@ -1,6 +1,6 @@
 #include "block.h"
 #include "osi/windows/wintrospection.h"
-#include <distorm.h>
+#include <distorm3/distorm.h>
 #include <memory>
 #include <string.h>
 
