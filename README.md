@@ -7,6 +7,8 @@ This repo is a prototype that builds PANDA's plugins out of tree. This assumed t
 sudo apt update
 sudo apt install -y libpcap0.8-dev libsqlite3-dev libdistorm3-dev libavro-dev
 git clone https://github.com/panda-re/panda-plugins
+git clone https://github.com/panda-re/libosi
+ln -s /path/to/libosi plugins/dependencies/libosi
 cd panda3-plugins
 ln -s /path/to/panda plugins/dependencies/panda/panda-wrapper 
 mkdir build && cd build
