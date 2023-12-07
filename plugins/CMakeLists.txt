@@ -37,9 +37,10 @@ include(ExternalProject)
 
 include("Macros.cmake")
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -fno-omit-frame-pointer -DNEED_CPU_H")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -fno-omit-frame-pointer -DNEED_CPU_H -DNCURSES_WIDECHAR -D_DEFAULT_SOURCE -D_XOPEN_SOURCE=600 -fPIE -DPIE -m64 -mcx16 -DXC_WANT_COMPAT_DEVICEMODEL_API -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE")
 
 message("Building PANDA3 plugins... ")
+include_directories(${PANDA_SRC_DIR}/panda-wrapper/)
 include_directories(${PANDA_SRC_DIR}/panda-wrapper/include/)
 include_directories(${PANDA_SRC_DIR}/panda-wrapper/panda/include/)
 
@@ -69,4 +70,4 @@ add_subdirectory(callstack)
 add_subdirectory(apicall_tracer)
 add_subdirectory(memory_regions)
 add_subdirectory(pmemdump)
-#add_subdirectory(volatility)
+add_subdirectory(volatility)

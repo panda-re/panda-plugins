@@ -9,10 +9,9 @@ set(SRC_FILES ${PANDA_PLUGIN_NAME}.cc
                         trace_engine/syscall_dispatcher.cc
                         trace_engine/syscall_manager.cc
                         trace_engine/syscall_cb.cc
-                        reporting/reporting.cc
-                        reporting/sqlite_model.cc)
+                        reporting/reporting.cc)
 
-set(LINK_LIBS -lsqlite3 -losi -loffset -liohal)
+set(LINK_LIBS libosi liboffset libiohal)
 set(LINK_LIBS_I386 ${LINK_LIBS}  
         panda_support_typesignature-i386 
         panda_ipanda-i386)

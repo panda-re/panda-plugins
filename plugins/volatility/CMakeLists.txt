@@ -11,7 +11,7 @@ include_directories(${PYTHON_INCLUDE_DIRS})
 # Set flags, build, and link the actual plugin
 add_definitions(-DNEED_CPU_H)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -std=c++11")
-set(LINK_LIBS ${PYTHON_LIBRARIES} -lavro -loffset -liohal -losi) 
+set(LINK_LIBS ${PYTHON_LIBRARIES} -lavro liboffset libiohal libosi) 
 set(SRC_FILES ${PANDA_PLUGIN_NAME}.cc memory-server.cc filter.cc)
 
 set(LINK_LIBS_I386 ${LINK_LIBS} panda_ipanda-i386)

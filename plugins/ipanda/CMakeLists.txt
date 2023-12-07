@@ -6,7 +6,7 @@ add_definitions(-DNEED_CPU_H)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -g -std=c++11")
 
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
-set(LINK_LIBS -ldistorm3 -lsqlite3 -liohal -loffset -losi)
+set(LINK_LIBS -ldistorm3 -lsqlite3 libiohal liboffset libosi)
 set(SRC_FILES 
     ipanda.cc
     panda_x86.cpp
@@ -26,3 +26,5 @@ set(SRC_FILES
 add_i386_plugin(${PLUGIN_TARGET} SRC_FILES LINK_LIBS)
 add_x86_64_plugin(${PLUGIN_TARGET} SRC_FILES LINK_LIBS)
 
+add_dependencies(${PLUGIN_TARGET}-i386 libiohal liboffset libosi)
+add_dependencies(${PLUGIN_TARGET}-x86_64 libiohal liboffset libosi)

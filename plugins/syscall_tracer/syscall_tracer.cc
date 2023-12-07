@@ -15,6 +15,7 @@ PANDAENDCOMMENT */
 #define __STDC_FORMAT_MACROS
 
 #include <cstring>
+#include <stdexcept>
 
 #include "panda/plugin.h"
 #include "panda/common.h"
@@ -32,6 +33,7 @@ extern "C" {
 bool init_plugin(void*);
 void uninit_plugin(void*);
 }
+
 // Internal data structure for managing callback managers
 auto g_syscall_managers =
     std::unique_ptr<std::vector<SyscallManager*>>(new std::vector<SyscallManager*>());
@@ -41,6 +43,8 @@ auto g_reporter = std::shared_ptr<RecordingContext>();
 
 std::shared_ptr<IntroPANDAManager> g_os_manager;
 struct WindowsKernelOSI* g_kernel_osi = nullptr;
+bool g_initialized = false;
+char* g_log_path;
 
 // Public API for adding system call managers
 // Client is responsible for freeing manager at uninit
@@ -56,6 +60,9 @@ void add_syscall_manager(SyscallManager* manager)
 static bool is_syscall_insn(CPUState* env, target_ptr_t pc)
 {
 #if defined(TARGET_I386)
+    if (!g_initialized) {
+        return false;
+    }
     unsigned char buf[2] = {};
     panda_virtual_memory_rw(env, pc, buf, 2, 0);
     // Check if the instruction is syscall (0F 05)
@@ -80,7 +87,12 @@ static bool is_syscall_insn(CPUState* env, target_ptr_t pc)
  * a system call.
  */
 void before_block_exec(CPUState* env, TranslationBlock* tb)
+
 {
+    if (!g_initialized) {
+        return;
+    }
+
     for (auto& manager : *g_syscall_managers) {
         manager->handle_potential_syscall_exit(env, tb->pc);
     }
@@ -93,6 +105,9 @@ void before_block_exec(CPUState* env, TranslationBlock* tb)
  */
 static int syscall_insn_callback(CPUState* env, target_ptr_t pc)
 {
+    if (!g_initialized) {
+        return 0;
+    }
     for (auto& manager : *g_syscall_managers) {
         manager->handle_sysenter(env, pc);
     }
@@ -130,8 +145,9 @@ bool init_plugin(void* self)
     }
 
     panda_arg_list* args = panda_get_args("syscall_tracer");
-    const char* database_path = strdup(panda_parse_string(args, "output", "syscalls.db"));
-    fprintf(stdout, "Writing analysis results to %s\n", database_path);
+    const char* log_path = strdup(panda_parse_string(args, "output", "syscalls.jsonl"));
+    fprintf(stdout, "Writing analysis results to %s\n", log_path);
+    g_log_path = (char*)log_path;
     panda_free_args(args);
 
     g_syscalls_osi.reset(new OsiSyscallInterface(profile, g_os_manager, "syscalls.db"));
@@ -141,7 +157,7 @@ bool init_plugin(void* self)
         return false;
     }
 
-    g_reporter = create_reporter_ctx(database_path);
+    g_reporter = create_reporter_ctx(log_path);
     if (!g_reporter || !g_reporter->is_valid()) {
         fprintf(stderr, "[%s] Failed to create a recording context\n", __FILE__);
         return false;

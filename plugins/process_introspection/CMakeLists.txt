@@ -6,7 +6,7 @@ add_definitions(-DNEED_CPU_H)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -std=c++11")
 
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
-set(LINK_LIBS -lavro -liohal -loffset -losi)
+set(LINK_LIBS -lavro libiohal liboffset libosi)
 set(SRC_FILES ${PANDA_PLUGIN_NAME}.cpp process_tracker.cpp)
 set(LINK_LIBS_I386 ${LINK_LIBS} panda_ipanda-i386)
 set(LINK_LIBS_X86_64 ${LINK_LIBS} panda_ipanda-x86_64)

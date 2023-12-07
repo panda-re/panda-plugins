@@ -60,9 +60,8 @@ bool init_avro(const char* dbname)
     // the default maximum size of a record to be written is 16K. We've seen this be
     // exceeded, when a process has *a lot* of modules, so we are just being safe here and
     // upping that to 16M.
-    status =
-        avro_file_writer_create_with_codec(dbname, g_process_schema, &g_db, "deflate", 0);
-
+    status = avro_file_writer_create_with_codec(dbname, g_process_schema, &g_db,
+                                                "deflate", 0);
     if (status) {
         fprintf(stderr, "[%s] Avro failed to open %s for writing\n", __FILE__, dbname);
         fprintf(stderr, "[E] error message: %s\n", avro_strerror());
@@ -200,13 +199,14 @@ bool init_plugin(void* self)
     if (!initialized) {
         fprintf(stderr, "[%s] Could not initialize the introspection library.\n",
                 __FILE__);
+        return false;
+        
     } else {
         g_tracker = std::unique_ptr<ProcessTracker>(new ProcessTracker(os_manager));
     }
 
     panda_free_args(args);
     return true;
-
 #else
     fprintf(stderr, "The process_introspection PANDA plugin does not support "
                     "this platform.\n");

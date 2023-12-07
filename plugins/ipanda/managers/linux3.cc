@@ -139,7 +139,6 @@ bool Linux3IntrospectionManager::initialize(CPUState* env)
         return false;
     }
 
-
     m_kosi->kernel_tlib = load_type_library(profile);
 
     // check that we have a good kernel osi

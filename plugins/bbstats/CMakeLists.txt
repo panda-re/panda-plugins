@@ -5,7 +5,7 @@ set(PLUGIN_TARGET "panda_${PANDA_PLUGIN_NAME}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -std=c++11")
 
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
-set(LINK_LIBS -lavro -ldistorm3 -loffset -liohal -losi)
+set(LINK_LIBS -lavro -ldistorm3 liboffset libiohal libosi)
 set(SRC_FILES ${PANDA_PLUGIN_NAME}.cpp block.cpp filter.cpp image.cpp process.cpp range.cpp)
 set(LINK_LIBS_I386 ${LINK_LIBS} panda_ipanda-i386)
 set(LINK_LIBS_X86_64 ${LINK_LIBS} panda_ipanda-x86_64)

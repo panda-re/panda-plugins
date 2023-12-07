@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstring>
 #include <map>
+#include <stdexcept>
 #include <string>
 
 #include "panda/plugin.h"
@@ -41,6 +42,11 @@ static std::map<std::string, uint64_t> windows_system_asid_lookup = {
 uint64_t get_kpcr_i386(CPUState* env)
 {
     auto gdtbase = panda_get_gdtbase(env);
+
+    if (gdtbase == (uint64_t)0) {
+        fprintf(stderr, "failed to retrieve a valid gdtbase\n");
+        return (uint64_t)-1;
+    }
 
     // read the FS segment descriptor from the GDT
     uint32_t e1 = 0, e2 = 0;
