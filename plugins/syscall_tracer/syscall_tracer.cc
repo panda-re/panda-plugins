@@ -79,6 +79,40 @@ static bool is_syscall_insn(CPUState* env, target_ptr_t pc)
     return false;
 }
 
+bool initialize_syscall_tracer(CPUState* env)
+{
+    const char* profile = panda_os_name;
+    const char* log_path = (const char*)g_log_path;
+
+    if (!init_ipanda(env, g_os_manager)) {
+        fprintf(stderr, "Could not initialize the introspection library.\n");
+        return false;
+    }
+
+    g_syscalls_osi.reset(new OsiSyscallInterface(profile, g_os_manager, "syscalls.db"));
+    if (!g_syscalls_osi) {
+        fprintf(stderr, "[%s] Failed to find a syscall profile for %s\n", __FILE__,
+                profile);
+        return false;
+    }
+
+    g_reporter = create_reporter_ctx(log_path);
+
+    if (!g_reporter || !g_reporter->is_valid()) {
+        fprintf(stderr, "[%s] Failed to create a recording context\n", __FILE__);
+        return false;
+    }
+
+    if (!init_trace_engine(profile, g_syscalls_osi, add_syscall_manager, g_reporter)) {
+        fprintf(stderr, "[%s] Failed to initialize trace engine!\n", __FILE__);
+        return false;
+    }
+
+    g_initialized = true;
+    fprintf(stdout, "Success initializing syscall_tracer!\n");
+    return g_initialized;
+}
+
 /**
  * Callback to before_block_exec for invoking syscall return
  * handlers. Each syscall manager maintains a list of return
@@ -114,15 +148,29 @@ static int syscall_insn_callback(CPUState* env, target_ptr_t pc)
     return 0;
 }
 
+bool context_switch_callback(CPUState* env, target_ulong old_asid, target_ulong new_asid)
+{
+    if (!g_initialized) {
+        initialize_syscall_tracer(env);
+    }
+
+    return false;
+}
+
 void register_panda_callbacks(void* self)
 {
     panda_cb pcb;
+    pcb.asid_changed = context_switch_callback;
+    panda_register_callback(self, PANDA_CB_ASID_CHANGED, pcb);
     pcb.insn_translate = is_syscall_insn;
     panda_register_callback(self, PANDA_CB_INSN_TRANSLATE, pcb);
     pcb.insn_exec = syscall_insn_callback;
     panda_register_callback(self, PANDA_CB_INSN_EXEC, pcb);
     pcb.before_block_exec = before_block_exec;
     panda_register_callback(self, PANDA_CB_BEFORE_BLOCK_EXEC, pcb);
+    pcb.after_loadvm =
+        (reinterpret_cast<void (*)(CPUState*)>(initialize_syscall_tracer));
+    panda_register_callback(self, PANDA_CB_AFTER_LOADVM, pcb);
 }
 
 bool init_plugin(void* self)
@@ -130,11 +178,6 @@ bool init_plugin(void* self)
 // Don't bother if we're not on a supported target
 #if defined(TARGET_I386)
     register_panda_callbacks(self);
-
-    if (!init_ipanda(self, g_os_manager)) {
-        fprintf(stderr, "Could not initialize the introspection library.\n");
-        return false;
-    }
 
     const char* profile = panda_os_name;
     if (!profile) {
@@ -150,24 +193,6 @@ bool init_plugin(void* self)
     g_log_path = (char*)log_path;
     panda_free_args(args);
 
-    g_syscalls_osi.reset(new OsiSyscallInterface(profile, g_os_manager, "syscalls.db"));
-    if (!g_syscalls_osi) {
-        fprintf(stderr, "[%s] Failed to find a syscall profile for %s\n", __FILE__,
-                profile);
-        return false;
-    }
-
-    g_reporter = create_reporter_ctx(log_path);
-    if (!g_reporter || !g_reporter->is_valid()) {
-        fprintf(stderr, "[%s] Failed to create a recording context\n", __FILE__);
-        return false;
-    }
-
-    if (!init_trace_engine(profile, g_syscalls_osi, add_syscall_manager, g_reporter)) {
-        fprintf(stderr, "[%s] Failed to initialize trace engine!\n", __FILE__);
-        return false;
-    }
-
 #else
     fprintf(stderr, "[%s] This platform is not currently supported.\n", __FILE__);
     return false;
@@ -175,4 +200,11 @@ bool init_plugin(void* self)
     return true;
 }
 
-void uninit_plugin(void* self) { uninit_trace_engine(); }
+void uninit_plugin(void* self) {
+    if (g_initialized) {
+        uninit_trace_engine();
+    } else {
+        throw std::runtime_error(
+            "panda introspection never initialized. Corrupted recording?\n");
+    }
+}
