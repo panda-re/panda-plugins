@@ -472,6 +472,12 @@ bool context_switch(CPUState* env, target_ulong oldval, target_ulong newval)
     return 0;
 }
 
+void set_callstack_osi(CurrentProcessOSI* call_tracer_current_process_osi)
+{
+    g_current_osi = call_tracer_current_process_osi;
+    g_needs_update = true;
+}
+
 bool init_callstack_plugin(void* self, CurrentProcessOSI* call_tracer_current_process_osi)
 {
     fprintf(stdout, "Initializing plugin callstack_instr\n");
