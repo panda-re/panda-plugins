@@ -24,7 +24,7 @@ bool init_plugin(void* self)
     panda_cb pcb;
 
     const char* tblog_filename = NULL;
-    panda_arg_list* args = panda_get_args("network_pcap-panda3");
+    panda_arg_list* args = panda_get_args("network_pcap");
     tblog_filename = panda_parse_string(args, "output", "network_pcap-panda3.pcap");
 
     if (!tblog_filename) {
