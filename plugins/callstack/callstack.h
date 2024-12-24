@@ -15,6 +15,7 @@ int register_callstack_callback(const std::string callback_type,
                                 callback_function_pointer new_pointer);
 bool init_callstack_plugin(void* self,
                            CurrentProcessOSI* call_tracer_current_process_osi);
+void set_callstack_osi(CurrentProcessOSI* call_tracer_current_process_osi);
 
 #ifdef __cplusplus
 extern "C" {

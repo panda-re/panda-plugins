@@ -64,6 +64,8 @@ const size_t MAX_FUNCTION_PROTOTYPE_SIZE = 512;
 
 std::shared_ptr<Windows7IntrospectionManager> g_os_manager;
 static struct WindowsKernelOSI* g_kernel_osi = nullptr;
+static char* g_database_path;
+bool g_initialized = false;
 
 int call_total = 0;
 int call_instrumented = 0;
@@ -289,9 +291,63 @@ struct call_id get_call_unique_id(CPUState* env, target_ulong func, uint64_t tid
     return identifier;
 }
 
+bool initialize_globals(CPUState* env)
+{
+    const char* profile = panda_os_name;
+    const char* database_path = (const char*)g_database_path;
+
+    std::shared_ptr<IntroPANDAManager> os_manager;
+    if (!init_ipanda(env, os_manager)) {
+        fprintf(stderr, "Could not initialize the introspection library.\n");
+        return false;
+    }
+
+    // TODO: temporary -- forcing to be windows specific so i don't have to edit any more
+    // code in this plugin
+    g_os_manager = std::dynamic_pointer_cast<Windows7IntrospectionManager>(os_manager);
+    g_kernel_osi = g_os_manager->get_kosi();
+
+    g_current_process = std::make_shared<Process>();
+    g_previous_asid = 0;
+
+    g_syscalls_osi.reset(new OsiSyscallInterface(profile, g_os_manager, "calls.db"));
+    if (!g_syscalls_osi) {
+        fprintf(stderr, "[%s] Failed to find a syscall profile for %s\n", __FILE__,
+                profile);
+        return false;
+    }
+
+    g_reporter = create_reporter_ctx(database_path, g_syscalls_osi.get());
+    if (!g_reporter || !g_reporter->is_valid()) {
+        fprintf(stderr, "[%s] Failed to create a recording context\n", __FILE__);
+        return false;
+    }
+
+    if (!init_trace_engine(profile, g_syscalls_osi, add_syscall_manager, g_reporter,
+                           g_kernel_osi)) {
+        fprintf(stderr, "[%s] Failed to initialize trace engine!\n", __FILE__);
+        return false;
+    }
+
+    if (g_current_osi == nullptr) {
+        fprintf(stderr, "[%s] The trace engine did not update introspection structure\n",
+                __FILE__);
+        return false;
+    }
+
+    g_initialized = true;
+    fprintf(stdout, "apicall_tracer initialized\n");
+    set_callstack_osi(g_current_osi);
+    return g_initialized;
+}
+
 void return_insn_callback(CPUState* env, target_ulong func)
 {
     ret_total++;
+
+    if (!g_initialized) {
+        return;
+    }
 
     // we aren't interested if this call has been in the kernel
     if (panda_in_kernel(env)) {
@@ -306,8 +362,10 @@ void return_insn_callback(CPUState* env, target_ulong func)
     if (windows_interesting_call_check(env, func, tid)) {
         ret_instrumented++;
 
+	int i = 0;
         for (auto& manager : *g_syscall_managers) {
-            manager->handle_potential_syscall_exit(env, func);
+	    manager->handle_potential_syscall_exit(env, func);
+	    i++;
         }
     }
 }
@@ -315,6 +373,10 @@ void return_insn_callback(CPUState* env, target_ulong func)
 void call_insn_callback(CPUState* env, target_ulong func)
 {
     call_total++;
+
+    if (!g_initialized) {
+        return;
+    }
 
     // we don't care about calls happening within the kernel
     if (panda_in_kernel(env)) {
@@ -338,6 +400,12 @@ void call_insn_callback(CPUState* env, target_ulong func)
 
 bool update_symbols(CPUState* env, target_ulong oldval, target_ulong newval)
 {
+    if (!g_initialized) {
+        if (!initialize_globals(env)) {
+            return 0;
+        }
+    }
+
     // create a list of modules using the current process
     auto process = kosi_get_current_process(g_kernel_osi);
     auto module_list = get_module_list(g_kernel_osi, process_get_eprocess(process),
@@ -436,52 +504,17 @@ bool init_plugin(void* self)
         strdup(panda_parse_string(tracer_args, "output", "results"));
     fprintf(stdout, "Writing analysis results to %s\n", database_path);
 
+    g_database_path = (char*)database_path;
+
     panda_free_args(tracer_args);
 
-    std::shared_ptr<IntroPANDAManager> os_manager;
-
-    if (!init_ipanda(self, os_manager)) {
-        fprintf(stderr, "Could not initialize the introspection library.\n");
-        return false;
-    }
-
-    // temporary -- forcing to be windows specific so i don't have to edit any more code
-    // in this plugin
-    g_os_manager = std::dynamic_pointer_cast<Windows7IntrospectionManager>(os_manager);
-    g_kernel_osi = g_os_manager->get_kosi();
-
-    g_current_process = std::make_shared<Process>();
-    g_previous_asid = 0;
-
-    g_syscalls_osi.reset(new OsiSyscallInterface(profile, g_os_manager, "calls.db"));
-    if (!g_syscalls_osi) {
-        fprintf(stderr, "[%s] Failed to find a syscall profile for %s\n", __FILE__,
-                profile);
-        return false;
-    }
-
-    g_reporter = create_reporter_ctx(database_path, g_syscalls_osi.get());
-    if (!g_reporter || !g_reporter->is_valid()) {
-        fprintf(stderr, "[%s] Failed to create a recording context\n", __FILE__);
-        return false;
-    }
-
-    if (!init_trace_engine(profile, g_syscalls_osi, add_syscall_manager, g_reporter,
-                           g_kernel_osi)) {
-        fprintf(stderr, "[%s] Failed to initialize trace engine!\n", __FILE__);
-        return false;
-    }
-
-    if (g_current_osi == nullptr) {
-        fprintf(stderr, "[%s] The trace engine did not update introspection structure\n",
-                __FILE__);
-        return false;
-    }
 
     // Call Backs
     panda_cb pcb;
     pcb.asid_changed = update_symbols;
     panda_register_callback(self, PANDA_CB_ASID_CHANGED, pcb);
+    pcb.after_loadvm = (reinterpret_cast<void (*)(CPUState*)>(initialize_globals));
+    panda_register_callback(self, PANDA_CB_AFTER_LOADVM, pcb);
 
     init_callstack_plugin(self, g_current_osi);
     register_callstack_callback("on_call", call_insn_callback);
@@ -490,7 +523,6 @@ bool init_plugin(void* self)
     fprintf(stderr, "[%s] This platform is not supported\n", __FILE__);
     return false;
 #endif
-    fprintf(stdout, "apicall_tracer initialized\n");
     return true;
 }
 
@@ -509,4 +541,9 @@ void uninit_plugin(void* self)
     fprintf(stdout, "\tCall Targets: %d Hits and %d Misses\n", target_hits,
             target_misses);
     fprintf(stdout, "\tCallers: %d Hits and %d Misses\n", caller_hits, caller_misses);
+    if (!g_initialized) {
+        // create output file
+        throw std::runtime_error(
+            "panda introspection never initialized. Corrupted recording?");
+    }
 }
