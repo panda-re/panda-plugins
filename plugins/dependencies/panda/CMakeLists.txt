@@ -18,15 +18,26 @@ if (NOT NCPU EQUAL 0)
     set(EP_BUILD_ACCEL_FLAG -j${NCPU})
 endif()
 
+if (DEFINED INCLUDE_DIR)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${INCLUDE_DIR}")
+endif()
+
+if (DEFINED LIBRARIES)
+    set(CMAKE_LD_FLAGS "${CMAKE_LD_FLAGS} ${LIBRARIES}")
+endif()
 
 include(ExternalProject)
-ExternalProject_Add(panda-ext
+ExternalProject_Add(panda-wrapped-ext
     SOURCE_DIR        "${PROJECT_SOURCE_DIR}/panda-wrapper"
     BINARY_DIR        "${CMAKE_BINARY_DIR}/panda-internal-build"
     INSTALL_DIR       "${CMAKE_INSTALL_PREFIX}"
-###CONFIGURE_COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/panda-wrapper/configure --target-list=x86_64-softmmu,i386-softmmu --prefix=${CMAKE_INSTALL_PREFIX}
-    CONFIGURE_COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/panda-wrapper/configure --target-list=x86_64-softmmu,i386-softmmu,arm-softmmu,aarch64-softmmu,ppc-softmmu,mips-softmmu,mipsel-softmmu --enable-llvm --with-llvm=/usr/lib/llvm-11 --prefix=${CMAKE_INSTALL_PREFIX}
-    
+    CONFIGURE_COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/panda-wrapper/configure
+    ARGS
+        --target-list=x86_64-softmmu,i386-softmmu,arm-softmmu,aarch64-softmmu,ppc-softmmu,mips-softmmu,mipsel-softmmu
+        --enable-llvm
+        --with-llvm=/usr/lib/llvm-11
+        --prefix=${CMAKE_INSTALL_PREFIX}
+        --extra-cxxflags=${CMAKE_CXX_FLAGS}
+        --extra-ldflags=${CMAKE_LD_FLAGS}
     BUILD_COMMAND make ${EP_BUILD_ACCEL_FLAG}
 )
-
