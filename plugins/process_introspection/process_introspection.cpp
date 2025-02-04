@@ -60,8 +60,9 @@ bool init_avro(const char* dbname)
     // the default maximum size of a record to be written is 16K. We've seen this be
     // exceeded, when a process has *a lot* of modules, so we are just being safe here and
     // upping that to 16M.
+    size_t sixteen_mib = 16 * 1024 * 1024;
     status = avro_file_writer_create_with_codec(dbname, g_process_schema, &g_db,
-                                                "deflate", 0);
+                                                "deflate", sixteen_mib);
     if (status) {
         fprintf(stderr, "[%s] Avro failed to open %s for writing\n", __FILE__, dbname);
         fprintf(stderr, "[E] error message: %s\n", avro_strerror());
@@ -155,15 +156,21 @@ void before_block_exec(CPUState* env, TranslationBlock* tb)
     return;
 }
 
+bool initialize_introspection_globals(CPUState* env)
+{
+    std::shared_ptr<IntroPANDAManager> os_manager;
+    if (init_ipanda(env, os_manager)) {
+        g_tracker = std::unique_ptr<ProcessTracker>(new ProcessTracker(os_manager));
+        fprintf(stdout, "success initializing ipanda!\n");
+        initialized = true;
+    }
+    return initialized;
+}
+
 bool context_switch_callback(CPUState* env, target_ulong old_asid, target_ulong new_asid)
 {
     if (!initialized) {
-        std::shared_ptr<IntroPANDAManager> os_manager;
-        if (init_ipanda(env, os_manager)) {
-            g_tracker = std::unique_ptr<ProcessTracker>(new ProcessTracker(os_manager));
-            fprintf(stdout, "success initializing ipanda!\n");
-            initialized = true;
-        } else {
+        if (!initialize_introspection_globals(env)) {
             return 0;
         }
     }
@@ -191,19 +198,9 @@ bool init_plugin(void* self)
     panda_register_callback(self, PANDA_CB_BEFORE_BLOCK_EXEC, pcb);
     pcb.asid_changed = context_switch_callback;
     panda_register_callback(self, PANDA_CB_ASID_CHANGED, pcb);
+    pcb.after_loadvm = (reinterpret_cast<void (*)(CPUState*)>(initialize_introspection_globals));
+    panda_register_callback(self, PANDA_CB_AFTER_LOADVM, pcb);
 
-    // Initialize introspection library
-    std::shared_ptr<IntroPANDAManager> os_manager;
-    initialized = init_ipanda(self, os_manager);
-
-    if (!initialized) {
-        fprintf(stderr, "[%s] Could not initialize the introspection library.\n",
-                __FILE__);
-        return false;
-        
-    } else {
-        g_tracker = std::unique_ptr<ProcessTracker>(new ProcessTracker(os_manager));
-    }
 
     panda_free_args(args);
     return true;
@@ -227,4 +224,8 @@ void uninit_plugin(void* self)
         }
     }
     teardown_avro();
+    if (!initialized) {
+        throw std::runtime_error(
+            "panda introspection never initialized. Corrupted recording?");
+    }
 }
