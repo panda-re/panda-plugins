@@ -22,6 +22,7 @@
 // general
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 
 // memory region
 #include "region.h"
@@ -45,6 +46,7 @@ bool g_needs_update;
 target_ulong current_pid;
 target_ulong current_asid;
 std::unique_ptr<WindowsProcessManager> g_posi;
+bool g_initialized = false;
 
 // cache of last region: useful for functions with many basic blocks
 // would cache region at first basic block and never look it up again
@@ -245,12 +247,43 @@ void walk_regions(osi::i_t vad)
     walk_regions(vad("RightChild"));
 }
 
+bool init_memory_regions(CPUState* env)
+{
+    // initialize globals
+    g_needs_update = true;
+    current_pid = 0;
+    current_asid = 0;
+    g_posi = std::make_unique<WindowsProcessManager>();
+
+    std::shared_ptr<IntroPANDAManager> os_manager;
+
+    if (!init_ipanda(env, os_manager)) {
+        fprintf(stderr, "Could not initialize the introspection library.\n");
+        return false;
+    }
+
+    // temporary -- forcing to be windows specific so i don't have to edit any more code
+    // in this plugin
+    g_os_manager = std::dynamic_pointer_cast<Windows7IntrospectionManager>(os_manager);
+    g_kernel_osi = g_os_manager->get_kosi();
+
+    g_initialized = true;
+    fprintf(stdout, "memory_regions initialized\n");
+    return g_initialized;
+}
+
+
 /*
     occurs notably when the ASID changes (which requires the page directory to be changed)
 */
 bool after_pgd_write(CPUState* env, target_ulong old_pgd, target_ulong new_pgd)
 {
-    g_needs_update = true;
+    if (!g_initialized) {
+        init_memory_regions(env);
+    }
+    if (g_initialized) {
+        g_needs_update = true;
+    }
     return 0;
 }
 
@@ -313,7 +346,7 @@ bool update_vads(CPUState* env)
 {
     bool success = false;
 
-    // if this is beign called, we have changed processes
+    // if this is being called, we have changed processes
     // and need a new process memory reader
     g_posi.reset(new WindowsProcessManager());
 
@@ -403,6 +436,8 @@ bool init_plugin(void* self)
     panda_register_callback(self, PANDA_CB_ASID_CHANGED, pcb);
     pcb.before_block_exec = before_block_exec;
     panda_register_callback(self, PANDA_CB_BEFORE_BLOCK_EXEC, pcb);
+    pcb.after_loadvm = (reinterpret_cast<void (*)(CPUState*)>(init_memory_regions));
+    panda_register_callback(self, PANDA_CB_AFTER_LOADVM, pcb);
 
     // Get desired results path
     panda_arg_list* args = panda_get_args("memory_regions");
@@ -416,23 +451,7 @@ bool init_plugin(void* self)
         return false;
     }
 
-    // initialize globals
-    g_needs_update = true;
-    current_pid = 0;
-    current_asid = 0;
-    g_posi = std::make_unique<WindowsProcessManager>();
 
-    std::shared_ptr<IntroPANDAManager> os_manager;
-
-    if (!init_ipanda(self, os_manager)) {
-        fprintf(stderr, "Could not initialize the introspection library.\n");
-        return false;
-    }
-
-    // temporary -- forcing to be windows specific so i don't have to edit any more code
-    // in this plugin
-    g_os_manager = std::dynamic_pointer_cast<Windows7IntrospectionManager>(os_manager);
-    g_kernel_osi = g_os_manager->get_kosi();
 
 #else
     fprintf(stderr, "[%s] Plugin not supported on this platform.\n", __FILE__);
@@ -447,4 +466,8 @@ void uninit_plugin(void* self)
 {
     dump_regions();
     teardown_avro();
+    if (!g_initialized) {
+        throw std::runtime_error(
+            "panda introspection never initialized. Corrupted recording?");
+    }
 }
