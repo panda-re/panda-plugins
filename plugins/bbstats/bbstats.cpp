@@ -36,6 +36,8 @@ avro_schema_t g_schema = nullptr;
 avro_schema_t g_subschema = nullptr;
 avro_file_writer_t g_db = nullptr;
 
+bool g_initialized = false;
+
 void teardown_avro()
 {
     avro_file_writer_flush(g_db);
@@ -165,9 +167,33 @@ void flush_stats()
     }
 }
 
+bool init_bbstats(CPUState* env)
+{
+    std::shared_ptr<IntroPANDAManager> os_manager;
+
+    if (!init_ipanda(env, os_manager)) {
+        fprintf(stderr, "Could not initialize the introspection library.\n");
+        return false;
+    }
+
+    // temporary -- forcing to be windows specific so i don't have to edit any more code
+    // in this plugin
+    g_os_manager = std::dynamic_pointer_cast<Windows7IntrospectionManager>(os_manager);
+    g_kernel_osi = g_os_manager->get_kosi();
+
+    g_initialized = true;
+    fprintf(stdout, "Finished initializing BBStats.\n");
+    return g_initialized;
+}
+
 bool process_change(CPUState* env, target_ulong oldval, target_ulong newval)
 {
-    g_target_thread = true;
+    if (!g_initialized) {
+        init_bbstats(env);
+    }
+    if (g_initialized) {
+        g_target_thread = true;
+    }
     return 0;
 }
 
@@ -250,26 +276,15 @@ bool init_plugin(void* self)
     }
     panda_free_args(bbstats_args);
 
-    std::shared_ptr<IntroPANDAManager> os_manager;
-
-    if (!init_ipanda(self, os_manager)) {
-        fprintf(stderr, "Could not initialize the introspection library.\n");
-        return false;
-    }
-
-    // temporary -- forcing to be windows specific so i don't have to edit any more code
-    // in this plugin
-    g_os_manager = std::dynamic_pointer_cast<Windows7IntrospectionManager>(os_manager);
-    g_kernel_osi = g_os_manager->get_kosi();
-
     // register callback
     panda_cb pcb;
     pcb.asid_changed = process_change;
     panda_register_callback(self, PANDA_CB_ASID_CHANGED, pcb);
     pcb.before_block_exec = before_block_exec;
     panda_register_callback(self, PANDA_CB_BEFORE_BLOCK_EXEC, pcb);
+    pcb.after_loadvm = (reinterpret_cast<void (*)(CPUState*)>(init_bbstats));
+    panda_register_callback(self, PANDA_CB_AFTER_LOADVM, pcb);
 
-    fprintf(stderr, "Finished initializing BBStats.\n");
     return true;
 }
 
@@ -277,4 +292,8 @@ void uninit_plugin(void* self)
 {
     flush_stats();
     teardown_avro();
+    if (!g_initialized) {
+        throw std::runtime_error(
+            "panda introspection never initialized. Corrupted recording?");
+    }
 }
