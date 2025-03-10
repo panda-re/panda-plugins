@@ -50,6 +50,10 @@ PANDAENDCOMMENT */
 // Trace Filtering
 #include "apicall_tracer/trace_filter.h"
 
+#include <fstream>
+#include <cstdio>
+#include <string>
+
 extern "C" {
 
 #define __STDC_FORMAT_MACROS
@@ -306,7 +310,6 @@ bool initialize_globals(CPUState* env)
     // code in this plugin
     g_os_manager = std::dynamic_pointer_cast<Windows7IntrospectionManager>(os_manager);
     g_kernel_osi = g_os_manager->get_kosi();
-
     g_current_process = std::make_shared<Process>();
     g_previous_asid = 0;
 
@@ -508,7 +511,6 @@ bool init_plugin(void* self)
 
     panda_free_args(tracer_args);
 
-
     // Call Backs
     panda_cb pcb;
     pcb.asid_changed = update_symbols;
@@ -535,6 +537,7 @@ void uninit_plugin(void* self)
     fprintf(stdout, "Call Stats:\n");
     fprintf(stdout, "\tCalls: Instrumented / Found: %d / %d\n", call_instrumented,
             call_total);
+
     fprintf(stdout, "\tReturns: Instrumented / Found: %d / %d\n", ret_instrumented,
             ret_total);
     fprintf(stdout, "Module Stats:\n");
@@ -543,7 +546,11 @@ void uninit_plugin(void* self)
     fprintf(stdout, "\tCallers: %d Hits and %d Misses\n", caller_hits, caller_misses);
     if (!g_initialized) {
         // create output file
-        throw std::runtime_error(
+        std::fstream results;
+	results.open(g_database_path,
+		     std::fstream::in | std::fstream::out | std::fstream::trunc);
+        results.close();
+	throw std::runtime_error(
             "panda introspection never initialized. Corrupted recording?");
     }
 }
