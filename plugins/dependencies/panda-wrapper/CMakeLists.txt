@@ -28,10 +28,10 @@ endif()
 
 include(ExternalProject)
 ExternalProject_Add(panda-wrapped-ext
-    SOURCE_DIR        "${PROJECT_SOURCE_DIR}/panda-wrapper"
+    SOURCE_DIR        "${PROJECT_SOURCE_DIR}/panda"
     BINARY_DIR        "${CMAKE_BINARY_DIR}/panda-internal-build"
     INSTALL_DIR       "${CMAKE_INSTALL_PREFIX}"
-    CONFIGURE_COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/panda-wrapper/configure
+    CONFIGURE_COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/panda/configure
     ARGS
         --target-list=x86_64-softmmu,i386-softmmu,arm-softmmu,aarch64-softmmu,ppc-softmmu,mips-softmmu,mipsel-softmmu
         --enable-llvm
