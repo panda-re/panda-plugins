@@ -1,6 +1,6 @@
 include(ExternalProject)
 
-set(PANDA_SRC_DIR "${CMAKE_SOURCE_DIR}/dependencies/panda" CACHE PATH "Path to the panda repo")
+set(PANDA_SRC_DIR "${CMAKE_SOURCE_DIR}/dependencies/panda-wrapper" CACHE PATH "Path to the panda repo")
 if(NOT EXISTS "${PANDA_SRC_DIR}")
     message(FATAL_ERROR "Could not find PANDA_SRC_DIR: ${PANDA_SRC_DIR}")
 endif()
@@ -77,13 +77,13 @@ add_dependencies(panda-i386 panda-ext)
 #target_link_libraries(panda-i386 INTERFACE libosi liboffset libiohal)
 set_target_properties(panda-i386 PROPERTIES IMPORTED_LOCATION ${CMAKE_INSTALL_PREFIX}/lib/libpanda-i386.so)
 set_target_properties(panda-i386 PROPERTIES INTERFACE_INCLUDE_DIRECTORIES
-    ${PANDA_SRC_DIR}/panda-wrapper/panda/include)
+    ${PANDA_SRC_DIR}/panda/panda/include)
 
 add_library(panda-x86_64 SHARED IMPORTED)
 add_dependencies(panda-x86_64 panda-ext)
 #target_link_libraries(panda-x86_64 INTERFACE libosi liboffset libiohal)
 set_target_properties(panda-x86_64 PROPERTIES IMPORTED_LOCATION ${CMAKE_INSTALL_PREFIX}/lib/libpanda-x86_64.so)
 set_target_properties(panda-x86_64 PROPERTIES INTERFACE_INCLUDE_DIRECTORIES
-    ${PANDA_SRC_DIR}/panda-wrapper/panda/include)
+    ${PANDA_SRC_DIR}/panda/panda/include)
 
 set(CMAKE_INSTALL_RPATH "$ORIGIN/../lib")
