@@ -1,7 +1,6 @@
 [submodule "plugins/dependencies/panda-wrapper/panda"]
 	path = plugins/dependencies/panda-wrapper/panda
 	url = https://github.com/panda-re/panda
-	branch = v1.8.54
 [submodule "plugins/dependencies/libosi"]
 	path = plugins/dependencies/libosi
 	url = https://github.com/panda-re/libosi
