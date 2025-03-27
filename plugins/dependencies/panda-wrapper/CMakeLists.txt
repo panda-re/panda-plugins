@@ -33,7 +33,7 @@ ExternalProject_Add(panda-wrapped-ext
     INSTALL_DIR       "${CMAKE_INSTALL_PREFIX}"
     CONFIGURE_COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/panda/configure
     ARGS
-        --target-list=x86_64-softmmu,i386-softmmu,arm-softmmu,aarch64-softmmu,ppc-softmmu,mips-softmmu,mipsel-softmmu
+        --target-list=${PANDA_ARCHS}
         --enable-llvm
         --with-llvm=/usr/lib/llvm-11
         --prefix=${CMAKE_INSTALL_PREFIX}
