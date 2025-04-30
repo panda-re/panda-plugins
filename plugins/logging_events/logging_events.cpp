@@ -5,10 +5,16 @@
 #include "osi/windows/manager.h"
 #include "osi/windows/pe.h"
 #include "osi/windows/wintrospection.h"
+#include "panda/plugins/callstack_instr/callstack_instr_ext.h"
 
 struct WindowsKernelOSI* g_kernel_osi = nullptr;
 bool g_initialized = false;
 char* g_log_path;
+
+// introspection into current process
+extern CurrentProcessOSI* g_current_osi;
+std::shared_ptr<Process> g_current_process;
+uint64_t g_previous_asid;
 
 
 extern "C" {
@@ -16,17 +22,35 @@ extern "C" {
     void uninit_plugin(void*);
 }
 
-static bool is_log_insn(CPUState* env, target_ptr_t pc) {
-    if (!g_initialized) {
+bool initialize_globals(CPUState* env) {
+    const char* profile = panda_os_name;
+    const char* database_path = (const char*)g_database_path;
+
+    std::shared_ptr<IntroPANDAManager> os_manager;
+    if (!init_ipanda(env, os_manager)) {
+        fprintf(stderr, "Could not initialize the introspection library.\n");
         return false;
     }
-    unsigned char buf[2] = {};
-    panda_virtual_memory_rw(env, pc, buf, 2, 0);
+}
+
+static bool is_log_insn(CPUState* env, target_ptr_t pc) {
+    target_ulong callers[16];
+    int n;
+    n = get_callers(callers, 16, env);
+
+    for (int i = 0; i < n; i++) {
+        cal
+    }
 }
 
 void register_panda_callbacks(void* self) {
     panda_cb pcb;
 
+}
+
+bool windows_interesting_call_check(CPUState* env, target_ulong func, uint64_t tid) {
+    auto pid = g_current_process->get_pid();
+    auto asid = g_current_process->get_asid();
 }
 
 
@@ -44,6 +68,9 @@ bool init_plugin(void* self)
 
     panda_require("osi");
     assert(init_os_api());
+
+    panda_require("callstack_instr");
+    assert(init_callstack_instr_api());
 
     panda_arg_list* args = panda_get_args("logging_events");
     const char* log_path = strdup(panda_parse_string(args, "output", "logging.jsonl"));
