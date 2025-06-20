@@ -2,10 +2,10 @@ set(PANDA_PLUGIN_NAME "memory_hash")
 set(PLUGIN_TARGET "panda_${PANDA_PLUGIN_NAME}")
 
 # Set flags, build and link the actual plugin
-include_directories(${CMAKE_CURRENT_BINARY_DIR})
+Include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -std=c++11")
-set(SRC_FILES ${PANDA_PLUGIN_NAME}.cpp)
+set(SRC_FILES ${PANDA_PLUGIN_NAME}.cpp pr61hash.cpp)
 
 set(LINK_LIBS_I386 ${LINK_LIBS})
 set(LINK_LIBS_X86_64 ${LINK_LIBS})
