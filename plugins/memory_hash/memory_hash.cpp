@@ -9,8 +9,8 @@
 #include <iomanip>
 #include <string>
 #include <map>
+#include <tuple>
 #include <array>
-#include <vector>
 #include <vector>
 #include <cassert>
 
@@ -35,9 +35,6 @@
 // These need to be extern "C" so that the ABI is compatible with
 // QEMU/PANDA, which is written in C
 extern "C" {
-    void phys_mem_after_write(CPUState *env, target_ulong pc, target_ulong addr, target_ulong size, void *buf);
-    void phys_mem_after_read(CPUState *env, target_ulong pc, target_ulong addr, target_ulong size, void *buf);
-    
     bool init_plugin(void*);
     void uninit_plugin(void*);
 }
@@ -49,9 +46,15 @@ extern "C" {
 // [X] TODO: Filter on a PID list
 // [X] TODO: Optimize filtering
 // [X] TODO: Polynomial Rolling Hash
-// [ ] TODO: Decide how/what to store 
-// [ ] TODO: 
-// [ ] TODO: 
+// [X] TODO: Decide how/what to store 
+// [ ] TODO: get ASID, PID for each page
+
+// for readability 
+using physical_t = uint64_t;
+using virtual_t = uint64_t;
+using asid_t = uint64_t;
+using pr61hash_t = uint64_t;
+
 
 // ### Globals
 bool s_memhash_initialized = false;
@@ -60,12 +63,16 @@ bool s_memhash_initialized = false;
 // ### Memory Hash Plugin Variables
 static FILE *output_fp;
 static uint64_t phys_write_count = 0;
-static std::map<uint64_t, std::vector<uint64_t>> phys_pages_written;
-static std::map<uint64_t, uint64_t> hash_freq;
+static std::map<physical_t, std::vector<pr61hash_t>> phys_pages_written;
+static std::map<physical_t, std::tuple<virtual_t, asid_t>> physical2virtual; 
+static std::map<pr61hash_t, uint64_t> hash_freq;
 
 static std::shared_ptr<IntroPANDAManager> os_manager;
 static auto tracefilter = std::shared_ptr<TraceFilter>();
 static bool allowed = false;
+
+// before_write triggers after_write to reduce filter checks
+static bool before_after = false;
 
 
 void write_json() {
@@ -95,7 +102,7 @@ void write_json() {
         pages_writtenj.AddMember(key, value, allocator);
     }
     document.AddMember("pages", pages_writtenj, allocator);
-    
+
     // Output Json
     char writeBuffer[65536]; // Buffer for writing
     rapidjson::FileWriteStream os(output_fp, writeBuffer, sizeof(writeBuffer));
@@ -110,13 +117,32 @@ bool mh_check_allowlist(CPUState *env) {
     return tracefilter->quickCheck(current_process.pid, current_process.asid);
 }
 
-void mh_phys_mem_write(CPUState *env, target_ptr_t pc, target_ptr_t addr, size_t size, uint8_t *buf)
+void mh_virt_mem_after_write(CPUState *env, target_ptr_t pc, target_ptr_t vaddr, size_t size, uint8_t *buf) 
+{
+    if (!before_after) return;
+    before_after = false;
+
+    asid_t asid = panda_current_asid(env);
+
+    physical_t paddr = panda_virt_to_phys(env, vaddr);
+    physical_t ppage_id = (paddr & ~(0xFFF)) >> 12;
+    physical_t vpage_id = (vaddr & ~(0xFFF)) >> 12;
+    //physical_t page_offset = (paddr & (0xFFF));
+  
+    if (physical2virtual.find(ppage_id) != physical2virtual.end()) { // found
+        assert(std::get<1>(physical2virtual[ppage_id]) == asid);
+        return;
+    }
+    physical2virtual[ppage_id] = std::make_tuple(vpage_id, asid);
+}
+
+void mh_phys_mem_before_write(CPUState *env, target_ptr_t pc, target_ptr_t addr, size_t size, uint8_t *buf)
 {
     if (!allowed || panda_in_kernel(env)) return;
     if (!mh_check_allowlist(env)) return;
 
-    target_ptr_t page_id = (addr & ~(0xFFF)) >> 12;
-    target_ptr_t page_offset = (addr & (0xFFF));
+    physical_t page_id = (addr & ~(0xFFF)) >> 12;
+    physical_t page_offset = (addr & (0xFFF));
     uint8_t buffer[PAGE_SIZE];
 
     phys_write_count++;
@@ -149,6 +175,7 @@ void mh_phys_mem_write(CPUState *env, target_ptr_t pc, target_ptr_t addr, size_t
     uint64_t delta = apply_delta(hash, buffer, buf, page_offset, size);
     phys_pages_written[page_id].push_back(delta);
     hash_freq[hash]++;
+    before_after = true;
 }
 
 bool mh_process_change(CPUState* env, target_ulong oldval, target_ulong newval)
@@ -200,7 +227,10 @@ bool init_plugin(void* self)
     pcb.after_loadvm = (reinterpret_cast<void (*)(CPUState*)>(init_memhash));
     panda_register_callback(self, PANDA_CB_AFTER_LOADVM, pcb);
 
-    pcb.phys_mem_before_write = mh_phys_mem_write;
+    pcb.virt_mem_after_write = mh_virt_mem_after_write;
+    panda_register_callback(self, PANDA_CB_VIRT_MEM_AFTER_WRITE,  pcb);
+    
+    pcb.phys_mem_before_write = mh_phys_mem_before_write;
     panda_register_callback(self, PANDA_CB_PHYS_MEM_BEFORE_WRITE,  pcb);
 
     // Track process changes to optimize checks for target threads
