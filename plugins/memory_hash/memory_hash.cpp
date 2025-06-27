@@ -54,6 +54,9 @@ using physical_t = uint64_t;
 using virtual_t = uint64_t;
 using asid_t = uint64_t;
 using pr61hash_t = uint64_t;
+using page_key_t = std::tuple<asid_t, virtual_t>;
+#define ASID 0
+#define PAGE 1
 
 
 // ### Globals
@@ -63,48 +66,66 @@ bool s_memhash_initialized = false;
 // ### Memory Hash Plugin Variables
 static FILE *output_fp;
 static uint64_t phys_write_count = 0;
-static std::map<physical_t, std::vector<pr61hash_t>> phys_pages_written;
-static std::map<physical_t, std::tuple<virtual_t, asid_t>> physical2virtual; 
+static std::map<page_key_t, std::vector<pr61hash_t>> pages_written;
 static std::map<pr61hash_t, uint64_t> hash_freq;
 
+// filter variables
 static std::shared_ptr<IntroPANDAManager> os_manager;
 static auto tracefilter = std::shared_ptr<TraceFilter>();
 static bool allowed = false;
 
 // before_write triggers after_write to reduce filter checks
-static bool before_after = false;
+static bool before_virt_phys = false;
+static page_key_t current_page_key;
 
 
 void write_json() {
     rapidjson::Document document;
     document.SetObject();
     rapidjson::Document::AllocatorType& allocator = document.GetAllocator();
+    std::stringstream ss;
 
     // Handle Pages
-    rapidjson::Value pages_writtenj(rapidjson::kObjectType);
-    for (const auto& kv : phys_pages_written) {
-        std::stringstream ss;
-        ss << std::hex << std::uppercase << std::setw(10) << std::setfill('0') << kv.first;
+    rapidjson::Value pages_writtenj(rapidjson::kArrayType);
+    for (const auto& kv : pages_written) {
+        // asid
+        ss << std::dec << std::get<ASID>(kv.first);
+        std::string asid = ss.str(); 
+        ss.str("");
+        ss.clear();
+
+        // page_id
+        ss << std::hex << std::uppercase << std::setw(10) << std::setfill('0') << std::get<PAGE>(kv.first);
         std::string page_id = ss.str(); 
-        
+        ss.str("");
+        ss.clear();
+
+        // hashes
         rapidjson::Value deltasj(rapidjson::kArrayType);
         for (const auto& delta : kv.second) {
-            std::stringstream ss;
             ss << std::hex << std::uppercase << std::setw(16) << std::setfill('0') << delta;
             std::string hash = ss.str();
+            ss.str("");
+            ss.clear();
 
             rapidjson::Value value(hash.c_str(), allocator);
             deltasj.PushBack(value, allocator);
         }
         
-        rapidjson::Value key(page_id.c_str(), allocator);
-        rapidjson::Value value(deltasj, allocator);
-        pages_writtenj.AddMember(key, value, allocator);
+        // element
+        rapidjson::Value ele(rapidjson::kObjectType);
+        rapidjson::Value asidj(asid.c_str(), allocator);
+        rapidjson::Value page_idj(page_id.c_str(), allocator);
+        ele.AddMember("asid", asidj, allocator);
+        ele.AddMember("page_id", page_idj, allocator);
+        ele.AddMember("hashes", deltasj, allocator);
+        
+        pages_writtenj.PushBack(ele, allocator);
     }
     document.AddMember("pages", pages_writtenj, allocator);
 
     // Output Json
-    char writeBuffer[65536]; // Buffer for writing
+    char writeBuffer[65536]; // Buffer for writing, recommend size by docs
     rapidjson::FileWriteStream os(output_fp, writeBuffer, sizeof(writeBuffer));
     rapidjson::Writer<rapidjson::FileWriteStream> writer(os); 
     document.Accept(writer);
@@ -117,41 +138,39 @@ bool mh_check_allowlist(CPUState *env) {
     return tracefilter->quickCheck(current_process.pid, current_process.asid);
 }
 
-void mh_virt_mem_after_write(CPUState *env, target_ptr_t pc, target_ptr_t vaddr, size_t size, uint8_t *buf) 
-{
-    if (!before_after) return;
-    before_after = false;
-
-    asid_t asid = panda_current_asid(env);
-
-    physical_t paddr = panda_virt_to_phys(env, vaddr);
-    physical_t ppage_id = (paddr & ~(0xFFF)) >> 12;
-    physical_t vpage_id = (vaddr & ~(0xFFF)) >> 12;
-    //physical_t page_offset = (paddr & (0xFFF));
-  
-    if (physical2virtual.find(ppage_id) != physical2virtual.end()) { // found
-        assert(std::get<1>(physical2virtual[ppage_id]) == asid);
-        return;
-    }
-    physical2virtual[ppage_id] = std::make_tuple(vpage_id, asid);
-}
-
-void mh_phys_mem_before_write(CPUState *env, target_ptr_t pc, target_ptr_t addr, size_t size, uint8_t *buf)
+void mh_virt_mem_before_write(CPUState *env, target_ptr_t pc, target_ptr_t vaddr, size_t size, uint8_t *buf) 
 {
     if (!allowed || panda_in_kernel(env)) return;
     if (!mh_check_allowlist(env)) return;
 
+    asid_t asid = panda_current_asid(env);
+
+    //physical_t paddr = panda_virt_to_phys(env, vaddr); // could fail
+    physical_t vpage_id = (vaddr & ~(0xFFF)) >> 12;
+  
+    current_page_key = std::make_tuple(asid, vpage_id);
+    before_virt_phys = true;
+}
+
+void mh_phys_mem_before_write(CPUState *env, target_ptr_t pc, target_ptr_t addr, size_t size, uint8_t *buf)
+{
+    if (!before_virt_phys) return;
+    before_virt_phys = false;
+    
+    asid_t asid = panda_current_asid(env);
     physical_t page_id = (addr & ~(0xFFF)) >> 12;
     physical_t page_offset = (addr & (0xFFF));
     uint8_t buffer[PAGE_SIZE];
 
     phys_write_count++;
     
+    // check that asid didnt just randomly change
+    assert(std::get<ASID>(current_page_key) == asid); 
+    
     assert(page_offset + size <= PAGE_SIZE); // read/writes should per page
 
     // Check if first time seeing page
-    if (phys_pages_written.find(page_id) == phys_pages_written.end()) {
-        
+    if (pages_written.find(current_page_key) == pages_written.end()) {
         // Get page to hash
         if (panda_physical_memory_rw(page_id, buffer, PAGE_SIZE, false) != MEMTX_OK) {
             std::cout << "ERROR: failed to read page: " << page_id << std::endl;
@@ -160,7 +179,7 @@ void mh_phys_mem_before_write(CPUState *env, target_ptr_t pc, target_ptr_t addr,
         
         // Calculate the full hash and update structures
         uint64_t hash = full_poly_hash(buffer);
-        phys_pages_written[page_id] = { hash };
+        pages_written[current_page_key] = { hash };
         hash_freq[hash]++;
     }
    
@@ -171,11 +190,10 @@ void mh_phys_mem_before_write(CPUState *env, target_ptr_t pc, target_ptr_t addr,
     }
 
     // Calculate delta and update structures
-    uint64_t hash = phys_pages_written[page_id].back();
+    uint64_t hash = pages_written[current_page_key].back();
     uint64_t delta = apply_delta(hash, buffer, buf, page_offset, size);
-    phys_pages_written[page_id].push_back(delta);
+    pages_written[current_page_key].push_back(delta);
     hash_freq[hash]++;
-    before_after = true;
 }
 
 bool mh_process_change(CPUState* env, target_ulong oldval, target_ulong newval)
@@ -227,8 +245,8 @@ bool init_plugin(void* self)
     pcb.after_loadvm = (reinterpret_cast<void (*)(CPUState*)>(init_memhash));
     panda_register_callback(self, PANDA_CB_AFTER_LOADVM, pcb);
 
-    pcb.virt_mem_after_write = mh_virt_mem_after_write;
-    panda_register_callback(self, PANDA_CB_VIRT_MEM_AFTER_WRITE,  pcb);
+    pcb.virt_mem_before_write = mh_virt_mem_before_write;
+    panda_register_callback(self, PANDA_CB_VIRT_MEM_BEFORE_WRITE,  pcb);
     
     pcb.phys_mem_before_write = mh_phys_mem_before_write;
     panda_register_callback(self, PANDA_CB_PHYS_MEM_BEFORE_WRITE,  pcb);
@@ -245,8 +263,14 @@ void uninit_plugin(void* self)
 {
     std::cout << PREFIX "unloading..." << std::endl;
     std::cout << PREFIX "individual page writes: " << phys_write_count << std::endl;
-    std::cout << PREFIX "unique pages pritten to: " << phys_pages_written.size() << std::endl;
+    std::cout << PREFIX "unique pages pritten to: " << pages_written.size() << std::endl;
     std::cout << PREFIX "unique hashes: " << hash_freq.size() << std::endl;
+
+    for (const auto& kv : hash_freq) {
+        if (kv.second > 2) {
+            std::cout << kv.first << " - " << kv.second << std::endl;
+        }
+    }
     
     std::cout << PREFIX "writing json output..." << std::endl;
     write_json();
