@@ -373,6 +373,10 @@ void before_block_exec(CPUState* env, TranslationBlock* tb)
 
 void after_block_exec(CPUState* env, TranslationBlock* tb, uint8_t exitCode)
 {
+    target_ulong pc = 0x0;
+    target_ulong cs_base = 0x0;
+    uint32_t flags = 0x0;
+
     if (g_needs_update) {
         update_filter(env);
     }
@@ -381,6 +385,7 @@ void after_block_exec(CPUState* env, TranslationBlock* tb, uint8_t exitCode)
         return;
     }
 
+    CPUArchState *CASenv = (CPUArchState *)env->env_ptr;
     auto tb_pc = tb->pc;
     auto tb_size = tb->size;
 
@@ -391,8 +396,8 @@ void after_block_exec(CPUState* env, TranslationBlock* tb, uint8_t exitCode)
         callstacks[get_stackid(env, tb_pc)].push_back(se);
 
         // Also track the function that gets called
-        uint64_t pc = panda_current_pc(env);
-        // This retrieves the pc in an architecture-neutral way
+        cpu_get_tb_cpu_state(CASenv, &pc, &cs_base, &flags);
+	// This retrieves the pc in an architecture-neutral way
         function_stacks[get_stackid(env, tb_pc)].push_back(pc);
 
         execute_callbacks(&on_call, env, pc);
@@ -408,7 +413,7 @@ void after_block_exec(CPUState* env, TranslationBlock* tb, uint8_t exitCode)
 int get_callers(target_ulong callers[], int n, CPUState* env)
 {
     std::vector<stack_entry>& v =
-        callstacks[get_stackid(env, rr_get_guest_instr_count())];
+        callstacks[get_stackid(env, env->panda_guest_pc)];
     auto rit = v.rbegin();
     int i = 0;
     for (/*no init*/; rit != v.rend() && i < n; ++rit, ++i) {
@@ -420,7 +425,7 @@ int get_callers(target_ulong callers[], int n, CPUState* env)
 int get_functions(target_ulong functions[], int n, CPUState* env)
 {
     std::vector<target_ulong>& v =
-        function_stacks[get_stackid(env, rr_get_guest_instr_count())];
+        function_stacks[get_stackid(env, env->panda_guest_pc)];
     if (v.empty()) {
         return 0;
     }
@@ -438,7 +443,7 @@ void get_prog_point(CPUState* env, prog_point* p)
         return;
 
     // Get address space identifier
-    target_ulong asid = get_asid(env, rr_get_guest_instr_count());
+    target_ulong asid = get_asid(env, env->panda_guest_pc);
     // Lump all kernel-mode CR3s together
 
     if (!in_kernelspace(env))
@@ -459,7 +464,7 @@ void get_prog_point(CPUState* env, prog_point* p)
 #endif
     }
 
-    p->pc = rr_get_guest_instr_count();
+    p->pc = env->panda_guest_pc;
 }
 
 bool context_switch(CPUState* env, target_ulong oldval, target_ulong newval)
@@ -468,7 +473,9 @@ bool context_switch(CPUState* env, target_ulong oldval, target_ulong newval)
     // it happens after the context register has been updated, sometimes before
     // and sometimes the value of the context register doesn't match old or new
     // so we wait until the next basic block and do our work there
-    g_needs_update = true;
+    if (g_current_osi) {
+        g_needs_update = true;
+    }
     return 0;
 }
 
@@ -484,6 +491,7 @@ bool init_callstack_plugin(void* self, CurrentProcessOSI* call_tracer_current_pr
     panda_cb pcb;
 
     g_current_osi = call_tracer_current_process_osi;
+    g_needs_update = g_current_osi != nullptr;
 
     panda_arg_list* filter_args = panda_get_args("trace_filter");
     const char* filter_file = strdup(panda_parse_string(filter_args, "file", ""));
