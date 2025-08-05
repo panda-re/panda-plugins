@@ -29,18 +29,27 @@ extern "C" {
     #include "panda/plugins/hooks2/hooks2.h"
 }
 
+// dynamic_symbols
 typedef struct symbol (*__resolve_symbol_t)(CPUState* cpu, target_ulong asid, char* section_name, char* symbol);
 __resolve_symbol_t __resolve_symbol = NULL;
 
 typedef struct symbol (*__hook_symbol_resolution_t)(struct hook_symbol_resolve* h);
 __hook_symbol_resolution_t __hook_symbol_resolution = NULL;
 
+typedef struct symbol (*__get_best_matching_symbol_t)(CPUState* cpu, target_ulong address, target_ulong asid);
+__get_best_matching_symbol_t __get_best_matching_symbol = NULL;
+
+// hooks
 typedef void (*__enable_hooking_t)();
 __enable_hooking_t __enable_hooking = NULL;
+
+typedef void (*__add_hook_t)(struct hook* h);
+__add_hook_t __add_hook = NULL;
 
 typedef void (*__add_symbol_hook_t)(struct symbol_hook* h);
 __add_symbol_hook_t __add_symbol_hook = NULL;
 
+// hooks2
 typedef void (*__enable_hooks2_t)(int id);
 __enable_hooks2_t __enable_hooks2 = NULL;
 
@@ -58,6 +67,9 @@ __add_hooks2_t __add_hooks2 = NULL;
 
 extern CurrentProcessOSI* g_current_osi = NULL;
 static std::shared_ptr<IntroPANDAManager> os_manager;
+
+static int id = 9;
+static bool hook_registered = false;
 
 
 bool init_log_detect(CPUState* env) {
@@ -78,7 +90,7 @@ bool context_switch_callback(CPUState* env, target_ulong old_asid, target_ulong 
     return false;
 }
 
-void syslog_hook(CPUState* env, target_ulong pc, int type, target_ulong bufp, int len) {
+void syslog_syscall_hook(CPUState* env, target_ulong pc, int type, target_ulong bufp, int len) {
     if (bufp) {
         uint8_t read_buf[20];
         panda_virtual_memory_read(env, bufp, read_buf, len);
@@ -86,91 +98,118 @@ void syslog_hook(CPUState* env, target_ulong pc, int type, target_ulong bufp, in
     }
 }
 
-// void syslog_block_hook(CPUState* env, TranslationBlock *tb, struct hook* h) {
-//     CPUX86State* regs = (CPUX86State*)env;
-//     target_ulong msg_ptr = regs->regs[R_ESI];  // 2nd arg: message
-//     target_ulong asid = panda_current_asid(env);
-//     struct symbol sym = __resolve_symbol(env, asid, nullptr, (char*)"syslog");
-//     printf("[RESOLVE] syslog resolved at address: 0x%lx (section: %s)\n", sym.address, sym.section);
+void syslog_block_hook(CPUState* env, TranslationBlock* tb, struct hook* h) {
+    // if (panda_current_pc(env) != tb->pc) {
+    //     return;
+    // }
 
-//     uint8_t buffer[256] = {0};
-//     printf("[DEBUG] msg_ptr = 0x%lx\n", msg_ptr);
-//     if (panda_virtual_memory_read(env, sym.address, buffer, sizeof(buffer) - 1)) {
-//         buffer[255] = '\0';
-//         printf("[HOOK] syslog(message=\"%s\")\n", (char*) buffer);
-//     } else {
-//         printf("[HOOK] syslog(message=<unreadable>)\n");
-//     }
-// }
-
-bool syslog_block_hook(CPUState* env, TranslationBlock *tb, void* data) {
-    printf("In syslog_block_hook\n");
     CPUX86State* regs = (CPUX86State*)env;
     target_ulong msg_ptr = regs->regs[R_ESI];  // 2nd arg: message
     target_ulong asid = panda_current_asid(env);
 
+    CPUArchState *CASenv = (CPUArchState *)env->env_ptr;
+    target_ulong pc = 0x0;
+    target_ulong cs_base = 0x0;
+    uint32_t flags = 0x0;
+    cpu_get_tb_cpu_state(CASenv, &pc, &cs_base, &flags);
+    
+    printf("tb pc: 0x%lx\n", tb->pc);
+    printf("In kernel: %d\n", panda_in_kernel(env));
+    // printf("pc: 0x%lx\n", panda_current_pc(env));
+    printf("pc: 0x%lx\n", pc);
+    printf("guest pc: 0x%lx\n", env->panda_guest_pc);
+
+    int num_bytes = 24;
+    uint8_t buf[num_bytes];
+    panda_virtual_memory_read(env, tb->pc, buf, num_bytes);
+    printf("[DISASM] tb->pc = 0x%lx | bytes = ", tb->pc);
+    for (int i = 0; i < num_bytes; i++) {
+        printf("%02x ", buf[i]);
+    }
+    printf("\n");
+
+
     uint8_t buffer[256] = {0};
+    printf("[DEBUG] msg_ptr = 0x%lx\n", msg_ptr);
     if (panda_virtual_memory_read(env, msg_ptr, buffer, sizeof(buffer) - 1)) {
         buffer[255] = '\0';
-        printf("[HOOK] syslog(message=\"%s\")\n", (char*) buffer);
+        printf("[HOOK] syslog(message=\"%s\")\n", buffer);
     } else {
         printf("[HOOK] syslog(message=<unreadable>)\n");
     }
-    return true;
+    // return true;
 }
 
-void on_syslog_resolved(struct hook_symbol_resolve* h, struct symbol sym, target_ulong asid) {
-    printf("[RESOLVE] syslog resolved at 0x%lx (section: %s)\n", sym.address, sym.section);
+// void on_syslog_resolved(struct hook_symbol_resolve* h, struct symbol sym, target_ulong asid) {
+//     printf("[RESOLVE] syslog resolved at 0x%lx (section: %s)\n", sym.address, sym.section);
 
-    // Install hooks2 instruction hook at the resolved address
-    int hook_id = __add_hooks2(
-        syslog_block_hook,
-        NULL,
-        false,
-        NULL,
-        NULL,
-        0, 0,
-        sym.address,
-        sym.address + 1
-    );
+//     // Install hooks2 instruction hook at the resolved address
+//     int hook_id = __add_hooks2(
+//         syslog_block_hook,
+//         NULL,
+//         false,
+//         NULL,
+//         NULL,
+//         0, 0,
+//         sym.address,
+//         sym.address + 1
+//     );
 
-    if (hook_id >= 0) {
-        printf("[HOOKS2] Hook installed with ID %d\n", hook_id);
-    } else {
-        printf("[ERROR] Failed to install hook via add_hooks2\n");
+//     if (hook_id >= 0) {
+//         printf("[HOOKS2] Hook installed with ID %d\n", hook_id);
+//         hook_registered = true;
+//     } else {
+//         printf("[ERROR] Failed to install hook via add_hooks2\n");
+//     }
+// }
+
+void register_hook(CPUState* env, TranslationBlock* tb) {
+    if (hook_registered) {
+        return;
     }
-}
+    struct symbol_hook h = {0};
+    strncpy(h.name, "calloc", 256);
+    h.cb.start_block_exec = syslog_block_hook;
+    h.offset = false;
+    h.type = PANDA_CB_START_BLOCK_EXEC;
+    __add_symbol_hook(&h);
 
-bool lib_call_hook(CPUState* env, target_ulong pc) {
     target_ulong asid = panda_current_asid(env);
-    struct symbol sym = __resolve_symbol(env, asid, NULL, "syslog");
-    printf("address: 0x%lx\n", sym.address); // 0x7f4a4715e1a0 
-    printf("value: %lx\n", sym.value); // d71a0
-    printf("name: %s\n", sym.name);
-    printf("section: %s\n", sym.section);
-    if (pc == sym.address) {
-        uint8_t read_buf[20];
-        read_buf[20] = '\0';
-        panda_virtual_memory_rw(env, pc, read_buf, 20, 0);
-        printf("syslog(%s)\n", (char*) read_buf);
+    // struct symbol sym = __resolve_symbol(env, asid, NULL, (char*)"syslog");
+    // printf("[RESOLVE] syslog resolved at address: 0x%lx (section: %s)\n", sym.address, sym.section);
+    // struct hook h = {0};
+    // h.addr = sym.address;
+    // h.asid = asid;
+    // h.type = PANDA_CB_START_BLOCK_EXEC;
+    // h.cb.start_block_exec = syslog_block_hook;
+    // h.km = MODE_ANY;
+    // h.enabled = true;
+    // h.sym = sym;
+    // h.context = NULL;
+    // __add_hook(&h);
+
+    hook_registered = true;
+
+    // struct hook_symbol_resolve h = {0};
+    // strncpy(h.name, "syslog", 256);
+    // h.hook_offset = true;
+    // h.enabled = true;
+    // h.cb = on_syslog_resolved;
+    // h.id = id;
+
+    // __hook_symbol_resolution(&h);
+    char* sym_str = "openlog";
+    struct symbol sym = __resolve_symbol(env, asid, NULL, sym_str);
+    printf("syslog address: 0x%lx\n", sym.address);
+    if (sym.address) {
+        printf("[FORCE] __resolve_symbol resolved %s at 0x%lx\n", sym.name, sym.address);
+    } else {
+        printf("[FORCE] __resolve_symbol failed to resolve %s\n", sym_str);
     }
-    return false;
-}
 
-void register_panda_callbacks(void* self) {
-    panda_cb pcb;
-
-    // pcb.after_loadvm = (reinterpret_cast<void (*)(CPUState*)>(init_log_detect));
-    // panda_register_callback(self, PANDA_CB_AFTER_LOADVM, pcb);
-
-    pcb.asid_changed = context_switch_callback;
-    panda_register_callback(self, PANDA_CB_ASID_CHANGED, pcb);
-
-    // set_callstack_osi(g_current_osi);
-    // init_callstack_plugin(self, g_current_osi);
-    // register_callstack_callback("on_call", call_insn_callback);
-
-    PPP_REG_CB("syscalls2", on_sys_syslog_enter, syslog_hook);
+    struct symbol matching = __get_best_matching_symbol(env, 0x7f4a4715e1a0, asid);
+    printf("[MATCHING NAME] %s\n", matching.name);
+    // return false;
 }
 
 
@@ -183,7 +222,8 @@ bool init_dynamic_symbols_api() {
     if (dynamic_symbols != NULL){
         __resolve_symbol = (__resolve_symbol_t) dlsym(dynamic_symbols, "resolve_symbol");
         __hook_symbol_resolution = (__hook_symbol_resolution_t) dlsym(dynamic_symbols, "hook_symbol_resolution");
-        if (__resolve_symbol == NULL || __hook_symbol_resolution == NULL) {
+        __get_best_matching_symbol = (__get_best_matching_symbol_t) dlsym(dynamic_symbols, "get_best_matching_symbol");
+        if (__resolve_symbol == NULL || __hook_symbol_resolution == NULL || __get_best_matching_symbol == NULL) {
             return false;
         }
     } else {
@@ -200,8 +240,9 @@ bool init_hooks_api() {
     }
     if (hooks != NULL){
         __enable_hooking = (__enable_hooking_t) dlsym(hooks, "enable_hooking");
+        __add_hook = (__add_hook_t) dlsym(hooks, "add_hook");
         __add_symbol_hook = (__add_symbol_hook_t) dlsym(hooks, "add_symbol_hook");
-        if (__enable_hooking == NULL || __add_symbol_hook == NULL) {
+        if (__enable_hooking == NULL || __add_hook == NULL || __add_symbol_hook == NULL) {
             return false;
         }
     } else {
@@ -228,6 +269,26 @@ bool init_hooks2_api() {
     return true;
 }
 
+void register_panda_callbacks(void* self) {
+    panda_cb pcb;
+
+    // pcb.after_loadvm = (reinterpret_cast<void (*)(CPUState*)>(init_log_detect));
+    // panda_register_callback(self, PANDA_CB_AFTER_LOADVM, pcb);
+
+    // pcb.asid_changed = register_hook;
+    // panda_register_callback(self, PANDA_CB_ASID_CHANGED, pcb);
+
+    pcb.before_block_exec = register_hook;
+    panda_register_callback(self, PANDA_CB_BEFORE_BLOCK_EXEC, pcb);
+
+    // set_callstack_osi(g_current_osi);
+    // init_callstack_plugin(self, g_current_osi);
+    // register_callstack_callback("on_call", call_insn_callback);
+
+    PPP_REG_CB("syscalls2", on_sys_syslog_enter, syslog_syscall_hook);
+}
+
+
 bool init_plugin(void* self)
 {
     fflush(stdout);
@@ -235,35 +296,17 @@ bool init_plugin(void* self)
 
     panda_require("syscalls2");
 
-    panda_enable_precise_pc();
+    // panda_enable_precise_pc();
 
     assert(init_dynamic_symbols_api());
 
-    // assert(init_hooks_api());
-    // __enable_hooking();
+    assert(init_hooks_api());
+    __enable_hooking();
 
-    assert(init_hooks2_api());
-    int id = 9;
-    __enable_hooks2(id);
+    // assert(init_hooks2_api());
+    // __enable_hooks2(id);
 
     register_panda_callbacks(self);
-
-    // struct symbol_hook h = {0};
-    // strncpy(h.name, "syslog", 256);
-    // h.cb.before_block_exec = syslog_block_hook;
-    // h.offset = false;
-    // h.type = PANDA_CB_BEFORE_BLOCK_EXEC;
-
-    // __add_symbol_hook(&h);
-
-    struct hook_symbol_resolve h = {0};
-    strncpy(h.name, "syslog", 256);
-    h.hook_offset = false;
-    h.enabled = true;
-    h.cb = on_syslog_resolved;
-    h.id = id;
-
-    __hook_symbol_resolution(&h);
 
     const char* profile = panda_os_name;
     if (!profile) {
@@ -273,15 +316,10 @@ bool init_plugin(void* self)
         return false;
     }
 
-
-    // panda_require("callstack_instr");
-    // assert(init_callstack_instr_api());
-
-    // panda_arg_list* args = panda_get_args("logging_events");
-    // const char* log_path = strdup(panda_parse_string(args, "output", "logging.jsonl"));
-    // fprintf(stdout, "Writing analysis results to %s\n", log_path);
-    // g_log_path = (char*)log_path;
-    // panda_free_args(args);
+    panda_arg_list* args = panda_get_args("logging_events");
+    const char* log_path = strdup(panda_parse_string(args, "output", "logging.jsonl"));
+    fprintf(stdout, "Writing analysis results to %s\n", log_path);
+    panda_free_args(args);
 
     return true;
 }
