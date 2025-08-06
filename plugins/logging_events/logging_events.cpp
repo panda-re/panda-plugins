@@ -168,7 +168,7 @@ void register_hook(CPUState* env, TranslationBlock* tb) {
         return;
     }
     struct symbol_hook h = {0};
-    strncpy(h.name, "calloc", 256);
+    strncpy(h.name, "syslog", 256);
     h.cb.start_block_exec = syslog_block_hook;
     h.offset = false;
     h.type = PANDA_CB_START_BLOCK_EXEC;
@@ -198,7 +198,7 @@ void register_hook(CPUState* env, TranslationBlock* tb) {
     // h.id = id;
 
     // __hook_symbol_resolution(&h);
-    char* sym_str = "openlog";
+    char* sym_str = "syslog";
     struct symbol sym = __resolve_symbol(env, asid, NULL, sym_str);
     printf("syslog address: 0x%lx\n", sym.address);
     if (sym.address) {
