@@ -2,10 +2,6 @@
 #define __STDC_FORMAT_MACROS
 #define OSI_TEST_ON_ASID_CHANGED
 
-#include "osi/windows/manager.h"
-#include "osi/windows/pe.h"
-#include "osi/windows/wintrospection.h"
-
 #include "panda/plugin.h"
 #include "panda/plugin_plugin.h"
 #include "panda/common.h"
@@ -18,16 +14,25 @@
 #include "callstack/prog_point.h"
 #include "apicall_tracer/trace_filter.h"
 
+
 extern "C" {
     bool init_plugin(void*);
     void uninit_plugin(void*);
     // #include "osi/osi_types.h"
     // #include "panda/plugins/osi/osi_ext.h"
     // #include "panda/plugins/osi/os_intro.h"
+    // #include "panda/plugins/osi_linux/default_profile.h"
+    #include "panda/plugins/osi_linux/kernel_profile.h"
     #include "panda/plugins/dynamic_symbols/dynamic_symbols_int_fns.h"
     #include "panda/plugins/hooks/hooks_int_fns.h"  
     #include "panda/plugins/hooks2/hooks2.h"
 }
+
+typedef bool (*__can_read_current_t)(CPUState* cpu);
+__can_read_current_t __can_read_current = NULL;
+
+typedef target_ptr_t (*__default_get_current_task_struct_t)(CPUState* cpu);
+__default_get_current_task_struct_t __default_get_current_task_struct = NULL;
 
 // dynamic_symbols
 typedef struct symbol (*__resolve_symbol_t)(CPUState* cpu, target_ulong asid, char* section_name, char* symbol);
@@ -98,12 +103,62 @@ void syslog_syscall_hook(CPUState* env, target_ulong pc, int type, target_ulong 
     }
 }
 
+static const uint8_t _zero_block[1024] = {0};
+static void actually_dump_physical_memory(FILE* out, size_t len)
+{
+    hwaddr addr = 0;
+    uint8_t block[sizeof(_zero_block)];
+
+    if (!out)
+        return;
+
+    while (len != 0)
+    {
+        size_t l = sizeof(block);
+        if (l > len)
+            l = len;
+        if (panda_physical_memory_read(addr, block, l) == MEMTX_OK)
+            fwrite(block, 1, l, out);
+        else
+            fwrite(_zero_block, 1, l, out);
+        addr += l;
+        len -= l;
+    }
+}
+
+static void dump_memory(char* filename, char* register_filename, uint64_t pmem_len){
+    FILE* out = fopen(filename, "wb");
+
+    if (pmem_len == 0){
+        // dump all memory if not specified as arg
+        pmem_len = ram_size;
+    }
+
+    actually_dump_physical_memory(out, pmem_len);
+    fclose(out);
+    if (register_filename)
+    {
+        if ((out = fopen(register_filename, "w")) != NULL)
+        {
+            CPUState* cpu;
+            CPU_FOREACH(cpu)
+            {
+                fprintf(out, "CPU#%d\n", cpu->cpu_index);
+                cpu_dump_state(cpu, out, fprintf, CPU_DUMP_FPU);
+            }
+            fclose(out);
+        }
+    }
+
+    panda_replay_end();
+}
+
 void syslog_block_hook(CPUState* env, TranslationBlock* tb, struct hook* h) {
     // if (panda_current_pc(env) != tb->pc) {
     //     return;
     // }
 
-    CPUX86State* regs = (CPUX86State*)env;
+    CPUX86State* regs = (CPUX86State*) env;
     target_ulong msg_ptr = regs->regs[R_ESI];  // 2nd arg: message
     target_ulong asid = panda_current_asid(env);
 
@@ -112,12 +167,24 @@ void syslog_block_hook(CPUState* env, TranslationBlock* tb, struct hook* h) {
     target_ulong cs_base = 0x0;
     uint32_t flags = 0x0;
     cpu_get_tb_cpu_state(CASenv, &pc, &cs_base, &flags);
+
+    uint8_t read_buf[20];
+    int status = panda_virtual_memory_read(env, 0x4191d5, read_buf, sizeof(read_buf) - 1);
+    printf("Status: %d\n", status);
+    if (status == 0) {
+        read_buf[255] = '\0';
+        printf("[HOOK] syslog(message=\"%s\")\n", read_buf);
+    } else {
+        printf("[HOOK] syslog(message=<unreadable>)\n");
+    }
     
+    printf("rr count: %lu\n", rr_get_guest_instr_count());
     printf("tb pc: 0x%lx\n", tb->pc);
     printf("In kernel: %d\n", panda_in_kernel(env));
     // printf("pc: 0x%lx\n", panda_current_pc(env));
     printf("pc: 0x%lx\n", pc);
-    printf("guest pc: 0x%lx\n", env->panda_guest_pc);
+    printf("guest pc: 0x%lx\n", env->panda_guest_pc); // probably from savevm state (begin record)
+    // dump_memory("mem2.ram", "mem2.regs.txt", 0);
 
     int num_bytes = 24;
     uint8_t buf[num_bytes];
@@ -128,16 +195,65 @@ void syslog_block_hook(CPUState* env, TranslationBlock* tb, struct hook* h) {
     }
     printf("\n");
 
+    // char* sym_str = "syslog";
+    // struct symbol sym = __resolve_symbol(env, asid, NULL, sym_str);
+    // printf("syslog address: 0x%lx\n", sym.address);
+    // if (sym.address) {
+    //     printf("[FORCE] __resolve_symbol resolved %s at 0x%lx %s 0x%lx\n", sym.name, sym.address, sym.section, sym.value);
+    // } else {
+    //     printf("[FORCE] __resolve_symbol failed to resolve %s\n", sym_str);
+    // }
 
+    struct {
+        const char* name;
+        const target_ulong* ptr;
+    } cpudata[] = {
+        {"RAX", &regs->regs[R_EAX]},
+        {"RBX", &regs->regs[R_EBX]},
+        {"RCX", &regs->regs[R_ECX]},
+        {"RDX", &regs->regs[R_EDX]},
+        {"R8", &regs->regs[8]},
+        {"R9", &regs->regs[9]},
+        {"RSI", &regs->regs[R_ESI]},
+        {"RDI", &regs->regs[R_EDI]},
+        {"RSP", &regs->regs[R_ESP]},
+        {"RBP", &regs->regs[R_EBP]},
+    };
+    // for (size_t i = 0; i < sizeof(cpudata)/sizeof(cpudata[0]); ++i)
+    // {
+    //     uint8_t buffer[256] = {0};
+    //     printf("[DEBUG] msg_ptr (%s) = %#18lx\n", cpudata[i].name, *cpudata[i].ptr);
+    //     if (panda_virtual_memory_read(env, *cpudata[i].ptr, buffer, sizeof(buffer) - 1)) {
+    //         buffer[255] = '\0';
+    //         printf("[HOOK] syslog(message=\"%s\")\n", buffer);
+    //     } else {
+    //         printf("[HOOK] syslog(message=<unreadable>)\n");
+    //     }
+    // }
+    // target_ulong start = regs->regs[R_ESP] - (8 * sizeof(uint64_t));
+    // for (size_t i = 0; i < 16; ++i)
+    // {
+    //     uint64_t stkdata = 0;
+    //     target_ulong target = start + (i * sizeof(stkdata));
+    //     if (panda_virtual_memory_read(env, target, (uint8_t*)&stkdata, sizeof(stkdata)))
+    //     {
+    //         printf("[Stack Dump] %#18lx: %#18lx\n", target, stkdata);
+    //     }
+    //     else
+    //     {
+    //         printf("[Stack Dump] %#18lx: <Unreadable>\n", target);
+    //     }
+    // }
     uint8_t buffer[256] = {0};
     printf("[DEBUG] msg_ptr = 0x%lx\n", msg_ptr);
-    if (panda_virtual_memory_read(env, msg_ptr, buffer, sizeof(buffer) - 1)) {
+    status = panda_virtual_memory_read(env, msg_ptr, buffer, sizeof(buffer) - 1);
+    printf("Status: %d\n", status);
+    if (status == 0) {
         buffer[255] = '\0';
         printf("[HOOK] syslog(message=\"%s\")\n", buffer);
     } else {
         printf("[HOOK] syslog(message=<unreadable>)\n");
     }
-    // return true;
 }
 
 // void on_syslog_resolved(struct hook_symbol_resolve* h, struct symbol sym, target_ulong asid) {
@@ -167,14 +283,15 @@ void register_hook(CPUState* env, TranslationBlock* tb) {
     if (hook_registered) {
         return;
     }
-    struct symbol_hook h = {0};
+    struct symbol_hook h = {0};3
     strncpy(h.name, "syslog", 256);
     h.cb.start_block_exec = syslog_block_hook;
-    h.offset = false;
     h.type = PANDA_CB_START_BLOCK_EXEC;
+    h.hook_offset = false;
+    strncpy(h.section, "libc-", 256);
     __add_symbol_hook(&h);
 
-    target_ulong asid = panda_current_asid(env);
+    // target_ulong asid = panda_current_asid(env);
     // struct symbol sym = __resolve_symbol(env, asid, NULL, (char*)"syslog");
     // printf("[RESOLVE] syslog resolved at address: 0x%lx (section: %s)\n", sym.address, sym.section);
     // struct hook h = {0};
@@ -199,16 +316,17 @@ void register_hook(CPUState* env, TranslationBlock* tb) {
 
     // __hook_symbol_resolution(&h);
     char* sym_str = "syslog";
-    struct symbol sym = __resolve_symbol(env, asid, NULL, sym_str);
-    printf("syslog address: 0x%lx\n", sym.address);
-    if (sym.address) {
-        printf("[FORCE] __resolve_symbol resolved %s at 0x%lx\n", sym.name, sym.address);
-    } else {
-        printf("[FORCE] __resolve_symbol failed to resolve %s\n", sym_str);
-    }
+    // struct symbol sym = __resolve_symbol(env, asid, NULL, sym_str);
+    // printf("syslog address: 0x%lx\n", sym.address);
+    // if (sym.address) {
+    //     printf("[FORCE] __resolve_symbol resolved %s at 0x%lx\n", sym.name, sym.address);
+    // } else {
+    //     printf("[FORCE] __resolve_symbol failed to resolve %s\n", sym_str);
+    // }
 
-    struct symbol matching = __get_best_matching_symbol(env, 0x7f4a4715e1a0, asid);
-    printf("[MATCHING NAME] %s\n", matching.name);
+    // struct symbol matching = __get_best_matching_symbol(env, 0x7f4a4715e1a0, asid);
+    // printf("[MATCHING NAME] %s\n", matching.name);
+
     // return false;
 }
 
@@ -269,6 +387,26 @@ bool init_hooks2_api() {
     return true;
 }
 
+bool init_osi_linux_api() {
+    void* osi_linux = panda_get_plugin_by_name("osi_linux");
+    if (osi_linux == NULL) {
+        panda_require("osi_linux");
+        osi_linux = panda_get_plugin_by_name("osi_linux");
+    }
+    if (osi_linux != NULL){
+        __can_read_current = (__can_read_current_t) dlsym(osi_linux, "can_read_current");
+        __default_get_current_task_struct = (__default_get_current_task_struct_t) dlsym(osi_linux, "default_get_current_task_struct");
+        if (__can_read_current == NULL || __default_get_current_task_struct == NULL) {
+            printf("can read current is null\n");
+            return false;
+        }
+    } else {
+        printf("osi linux is null\n");
+        return false;
+    }
+    return true;
+}
+
 void register_panda_callbacks(void* self) {
     panda_cb pcb;
 
@@ -296,9 +434,10 @@ bool init_plugin(void* self)
 
     panda_require("syscalls2");
 
-    // panda_enable_precise_pc();
+    panda_enable_precise_pc();
 
     assert(init_dynamic_symbols_api());
+    // assert(init_osi_linux_api());
 
     assert(init_hooks_api());
     __enable_hooking();
