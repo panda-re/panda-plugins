@@ -12,7 +12,7 @@ import hashlib
 import tempfile
 import traceback
 
-# import volatility3
+import volatility3
 from volatility3.cli import text_renderer
 from volatility3.plugins.windows import psscan, pslist, svcscan, netscan, vadinfo
 from volatility3.framework.interfaces.context import ModuleInterface, ModuleContainer
@@ -68,26 +68,39 @@ def pslist_visitor(node, accumulator):
         if img_name == "services.exe":
             print(offset)
             breakpoint()
-        sdata = {
+        pdata = {
             "pid": int(pid),
             "ppid": int(ppid),
             "asid": int(proc.Pcb.DirectoryTableBase),
             "ImagePathName": img_name,
         }
-        accumulator.append(sdata)
+        accumulator.append(pdata)
     return accumulator
 
 
 def svcscan_visitor(node, accumulator):
     if node.values:
-        print(node)
-        breakpoint()
-    
+        # print(node)
+        offset = node.values[0]
+        pid = node.values[2]
+        state = node.values[4]
+        name, display_name = node.values[6:8]
+
+        pid = str(pid) if type(pid) == volatility3.framework.renderers.NotApplicableValue else int(pid)
+
+        svc_data = {
+            "ServiceName": name,
+            "DisplayName": display_name,
+            "State": state,
+            "Pid": pid,
+            "offset": int(offset),
+        }
+        accumulator.append(svc_data)
+        # breakpoint()
     return accumulator
 
 def driverscan_visitor(node, accumulator):
     if node.values:
-        print(node)
         offset, start = node.values[:2]
         name = node.values[-1]
         drv_data = {
@@ -96,8 +109,7 @@ def driverscan_visitor(node, accumulator):
             "name": str(name),
         }
         accumulator.append(drv_data)
-        breakpoint()
-    
+        # breakpoint()
     return accumulator
 
 
@@ -169,6 +181,12 @@ def get_svcscan():
     svcscan_data = []
     treegrid.visit(node=None, function=svcscan_visitor, initial_accumulator=svcscan_data)
     driverscan_data = get_driverscan()
+
+    for i in range(len(svcscan_data)):
+        for drv in driverscan_data:
+            if svcscan_data[i]["offset"] == drv["offset"]:
+                svcscan_data[i]["DriverName"] = drv["name"]
+                continue
     return svcscan_data
 
 
@@ -186,7 +204,6 @@ def get_driverscan():
 def get_sockets():
     """List all of the sockets that have not been unlinked or hidden"""
 
-    # This only works for Vista and later
     config_path = "plugins.NetScan"
     automagics = automagic.choose_automagic(available_automagics, netscan.NetScan)
     constructed = plugins.construct_plugin(ctx, automagics, netscan.NetScan, config_path, progress_callback=None, open_method=None)
@@ -227,4 +244,4 @@ if __name__ == "__main__":
     ctx = contexts.Context()
     ctx.config["automagic.LayerStacker.single_location"] = f"file:{image}"
     available_automagics = automagic.available(ctx)
-    print(get_driverscan())
+    print(get_svcscan())
