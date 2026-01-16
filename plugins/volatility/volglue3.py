@@ -191,7 +191,7 @@ def get_svcscan():
 
 
 def get_driverscan():
-    from volatility3.plugins.windows import driverscan
+    from volatility3.plugins.windows import driverscan # Imported here because circular import error when at top of file
     config_path = "plugins.DriverScan"
     automagics = automagic.choose_automagic(available_automagics, driverscan.DriverScan)
     constructed = plugins.construct_plugin(ctx, automagics, driverscan.DriverScan, config_path, progress_callback=None, open_method=None)
