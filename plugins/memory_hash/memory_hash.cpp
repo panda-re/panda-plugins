@@ -162,7 +162,7 @@ void mh_virt_mem_before_write(CPUState *env, target_ptr_t pc, target_ptr_t vaddr
         //    << " HASH_OLD: " << hash_prev
         //    << std::dec << std::setw(0) << std::endl;
         if (hash_curr != hash_prev) {
-            std::cerr << PREFIX "WARNING: page update went undetected, syncing..." << std::endl;
+            //std::cerr << PREFIX "WARNING: page update went undetected, syncing..." << std::endl;
             pages_written[current_page_key].push_back(hash_curr);
             hash_freq[hash_curr]++;
         }
@@ -173,12 +173,8 @@ void mh_virt_mem_before_write(CPUState *env, target_ptr_t pc, target_ptr_t vaddr
         size = PAGE_SIZE - vpage_offset;
     }
    
-    //prepare buffers to align
-    uint8_t buffer_new[PAGE_SIZE];
-    memcpy(&buffer_new[vpage_offset], buf, size);
-    
     pr61hash_t hash_old = pages_written[current_page_key].back();
-    hash_new = apply_delta(hash_old, buffer, buffer_new, size, vpage_offset);
+    hash_new = apply_delta(hash_old, &buffer[vpage_offset], buf, size, vpage_offset);
     hash_uncommitited[current_page_key] = hash_new;
     hash_freq[hash_new]++;
 
@@ -199,22 +195,28 @@ void mh_virt_mem_after_write(CPUState *env, target_ptr_t pc, target_ptr_t vaddr,
 
     asid_t asid = panda_current_asid(env);
     physical_t vpage_id = (vaddr & ~(0xFFF));
-    physical_t vpage_offset = (vaddr & (0xFFF));
+    //physical_t vpage_offset = (vaddr & (0xFFF));
     uint8_t buffer[PAGE_SIZE];
     
     if (panda_virtual_memory_read(env, vpage_id, buffer, PAGE_SIZE) == -1) return;
      
     page_key_t current_page_key = std::make_tuple(asid, vpage_id);
-    //uint64_t hash_a = full_poly_hash(buffer);
     pr61hash_t hash_new = hash_uncommitited[current_page_key];
-    //std::cout << PREFIX "after PAGE unchanged check: " << (hash_a != hash_b) 
+    
+    pr61hash_t hash_prev = pages_written[current_page_key].back();
+    if (hash_prev == hash_new) return;
+
+    //pr61hash_t hash_a = full_poly_hash(buffer);
+    //std::cout << PREFIX "after PAGE unchanged check: " << (hash_a != hash_new) 
     //    << std::hex << std::uppercase << std::setw(16) << std::setfill('0')
     //    << " HASH_NEW: " << hash_a
-    //    << " HASH_OLD: " << hash_b
+    //    << " HASH_OLD: " << hash_new
     //    << std::dec << std::setw(0) << std::endl;
+    //assert(hash_a == hash_new);
 
     //commit hash
     pages_written[current_page_key].push_back(hash_new);
+    phys_write_count++;
  
     //std::cout << PREFIX << "DEBUG: after"
     //    << std::hex << std::uppercase << std::setw(16) << std::setfill('0')
@@ -223,7 +225,7 @@ void mh_virt_mem_after_write(CPUState *env, target_ptr_t pc, target_ptr_t vaddr,
     //    << " OFFSET: 0x" << vpage_offset
     //    << " SIZE: 0x" << size
     //    << " MULTIPAGE: " << (vpage_offset + size > PAGE_SIZE)
-    //    << " COMMITTED: " << hash_b
+    //    << " COMMITTED: " << hash_new
     //    << std::dec << std::setw(0) << std::endl;
 }
 
@@ -288,9 +290,6 @@ bool init_plugin(void* self)
     pcb.virt_mem_after_write = mh_virt_mem_after_write;
     panda_register_callback(self, PANDA_CB_VIRT_MEM_AFTER_WRITE,  pcb);
     
-    //pcb.phys_mem_before_write = mh_phys_mem_before_write;
-    //panda_register_callback(self, PANDA_CB_PHYS_MEM_BEFORE_WRITE,  pcb);
-
     // Track process changes to optimize checks for target threads
     pcb.asid_changed = mh_process_change;
     panda_register_callback(self, PANDA_CB_ASID_CHANGED,  pcb);
@@ -307,11 +306,13 @@ void uninit_plugin(void* self)
     std::cout << PREFIX "unique pages pritten to: " << pages_written.size() << std::endl;
     std::cout << PREFIX "unique hashes: " << hash_freq.size() << std::endl;
 
+    std::cout << std::hex;
     for (const auto& kv : hash_freq) {
-        if (kv.second > 2) {
+        if (kv.second > 100) {
             std::cout << kv.first << " - " << kv.second << std::endl;
         }
     }
+    std::cout << std::dec;
     
     std::cout << PREFIX "writing json output..." << std::endl;
     write_json();

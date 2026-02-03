@@ -55,8 +55,8 @@ uint64_t apply_delta(uint64_t hash, uint8_t *old_buffer, uint8_t *new_buffer, si
 // Compute all changes and apply to current hash. NOTE: Buffers expected to be PAGE_SIZE
 {
     uint64_t curr_h = hash;
-    for (size_t i = offset; i < offset+size; i++) {
-       curr_h = delta_poly_hash(curr_h, i, old_buffer[i], new_buffer[i]);
+    for (size_t i = 0; i < size; i++) {
+       curr_h = delta_poly_hash(curr_h, offset+i, old_buffer[i], new_buffer[i]);
     }
     return curr_h;
 }
