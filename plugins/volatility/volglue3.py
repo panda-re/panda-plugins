@@ -14,7 +14,7 @@ import traceback
 
 import volatility3
 from volatility3.cli import text_renderer
-from volatility3.plugins.windows import psscan, pslist, svcscan, netscan, vadinfo
+from volatility3.plugins.windows import pedump, psscan, pslist, svcscan, netscan, vadinfo
 from volatility3.framework.interfaces.context import ModuleInterface, ModuleContainer
 from volatility3.framework import automagic, contexts, interfaces, plugins
 
@@ -44,6 +44,83 @@ def hash_file(filepath, *algorithms):
                 a.update(chunk)
 
     return {a.name: a.hexdigest().lower() for a in algorithms}
+
+
+def get_process_hashes():
+    config_path = "plugins.PEDump"
+    automagics = automagic.choose_automagic(available_automagics, pedump.PEDump)
+    breakpoint()
+    constructed = plugins.construct_plugin(ctx, automagics, pedump.PEDump, config_path, progress_callback=None, open_method=None)
+    treegrid = constructed.run()
+    breakpoint()
+
+    results = []
+    for proc in runner.calculate():
+        addr = proc.get_process_address_space()
+
+        vtop_check = False
+        invalid = any(
+            [
+                addr is None,
+                proc.Peb is None,
+            ]
+        )
+        if proc.Peb:
+            vtop_check = addr.vtop(proc.Peb.ImageBaseAddress) is None
+
+        if invalid:
+            if vtop_check:
+                continue
+
+        if is_interesting(proc, filter_data):
+            name = str(proc.ImageFileName)
+
+            runner.dump_pe(addr, proc.Peb.ImageBaseAddress, name)
+
+            dumped_file = os.path.join(config.DUMP_DIR, name)
+
+            result = {
+                "pid": int(proc.UniqueProcessId),
+                "base": int(proc.Peb.ImageBaseAddress),
+            }
+            result.update(hash_file(dumped_file, hashlib.sha256()))
+            results.append(result)
+
+    return results
+
+
+def get_memory_hashes(filter_data):
+    breakpoint()
+    runner = vadinfo.VADDump()
+
+    results = []
+    for proc in runner.calculate():
+        addr = proc.get_process_address_space()
+
+        if not addr:
+            continue
+
+        if is_interesting(proc, filter_data):
+
+            for vad, _ in proc.get_vads(
+                vad_filter=lambda v: v.Length < pow(2, 30), skip_max_commit=True
+            ):
+                path = os.path.join(
+                    config.DUMP_DIR,
+                    "{}_{}.{}".format(vad.Start, vad.End, proc.UniqueProcessId),
+                )
+
+                runner.dump_vad(path, vad, addr)
+
+                result = {
+                    "pid": int(proc.UniqueProcessId),
+                    "start": int(vad.Start),
+                    "end": int(vad.End),
+                }
+                result.update(hash_file(path, hashlib.sha256()))
+                results.append(result)
+
+    return results
 
 def socket_visitor(node, accumulator):
     if node.values:
@@ -86,14 +163,14 @@ def svcscan_visitor(node, accumulator):
         state = node.values[4]
         name, display_name = node.values[6:8]
 
-        pid = str(pid) if type(pid) == volatility3.framework.renderers.NotApplicableValue else int(pid)
+        pid = -1 if type(pid) == volatility3.framework.renderers.NotApplicableValue else int(pid)
 
         svc_data = {
             "ServiceName": name,
             "DisplayName": display_name,
+            "DriverName": '',
             "State": state,
             "Pid": pid,
-            "offset": int(offset),
         }
         accumulator.append(svc_data)
         # breakpoint()
@@ -102,51 +179,15 @@ def svcscan_visitor(node, accumulator):
 def driverscan_visitor(node, accumulator):
     if node.values:
         offset, start = node.values[:2]
+        servicekey = node.values[3]
         name = node.values[-1]
         drv_data = {
-            "offset": int(offset),
-            "start": int(start),
+            "servicekey": servicekey,
             "name": str(name),
         }
         accumulator.append(drv_data)
         # breakpoint()
     return accumulator
-
-
-def get_memory_hashes(filter_data):
-
-    runner = vadinfo.VADDump(config)
-
-    results = []
-    for proc in runner.calculate():
-        addr = proc.get_process_address_space()
-
-        if not addr:
-            continue
-
-        if is_interesting(proc, filter_data):
-
-            for vad, _ in proc.get_vads(
-                vad_filter=lambda v: v.Length < pow(2, 30), skip_max_commit=True
-            ):
-                path = os.path.join(
-                    config.DUMP_DIR,
-                    "{}_{}.{}".format(vad.Start, vad.End, proc.UniqueProcessId),
-                )
-
-                runner.dump_vad(path, vad, addr)
-
-                result = {
-                    "pid": int(proc.UniqueProcessId),
-                    "start": int(vad.Start),
-                    "end": int(vad.End),
-                }
-                result.update(hash_file(path, hashlib.sha256()))
-                results.append(result)
-
-    shutil.rmtree(config.DUMP_DIR)
-
-    return results
 
 
 def get_pslist():
@@ -182,11 +223,10 @@ def get_svcscan():
     treegrid.visit(node=None, function=svcscan_visitor, initial_accumulator=svcscan_data)
     driverscan_data = get_driverscan()
 
-    for i in range(len(svcscan_data)):
+    for svc in svcscan_data:
         for drv in driverscan_data:
-            if svcscan_data[i]["offset"] == drv["offset"]:
-                svcscan_data[i]["DriverName"] = drv["name"]
-                continue
+            if svc["ServiceName"] == drv["servicekey"]:
+                svc["DriverName"] = drv["name"]
     return svcscan_data
 
 
@@ -206,6 +246,7 @@ def get_sockets():
 
     config_path = "plugins.NetScan"
     automagics = automagic.choose_automagic(available_automagics, netscan.NetScan)
+    breakpoint()
     constructed = plugins.construct_plugin(ctx, automagics, netscan.NetScan, config_path, progress_callback=None, open_method=None)
     treegrid = constructed.run()
     socket_data = []
@@ -244,4 +285,7 @@ if __name__ == "__main__":
     ctx = contexts.Context()
     ctx.config["automagic.LayerStacker.single_location"] = f"file:{image}"
     available_automagics = automagic.available(ctx)
-    print(get_svcscan())
+    svcs = get_svcscan()
+
+    # with open("svcs3.json", 'w') as f:
+    #     json.dump(svcs, f, indent=None, separators=(',\n', ': '))
