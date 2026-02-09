@@ -19,6 +19,10 @@ from volatility3.framework.interfaces.context import ModuleInterface, ModuleCont
 from volatility3.framework import automagic, contexts, interfaces, plugins
 
 
+ctx = contexts.Context()
+
+
+
 def filter_invalid_ascii(strobj):
     return strobj.encode("utf-8", "replace")
 
@@ -49,10 +53,10 @@ def hash_file(filepath, *algorithms):
 def get_process_hashes():
     config_path = "plugins.PEDump"
     automagics = automagic.choose_automagic(available_automagics, pedump.PEDump)
-    breakpoint()
+    # breakpoint()
     constructed = plugins.construct_plugin(ctx, automagics, pedump.PEDump, config_path, progress_callback=None, open_method=None)
     treegrid = constructed.run()
-    breakpoint()
+    # breakpoint()
 
     results = []
     for proc in runner.calculate():
@@ -90,7 +94,7 @@ def get_process_hashes():
 
 
 def get_memory_hashes(filter_data):
-    breakpoint()
+    # breakpoint()
     runner = vadinfo.VADDump()
 
     results = []
@@ -142,9 +146,9 @@ def pslist_visitor(node, accumulator):
     if node.values:
         pid, ppid, img_name, offset = node.values[0:4]
         proc = ctx.object("symbol_table_name1!_EPROCESS", "layer_name", offset)
-        if img_name == "services.exe":
-            print(offset)
-            breakpoint()
+        # if img_name == "services.exe":
+        #     print(offset)
+        #     breakpoint()
         pdata = {
             "pid": int(pid),
             "ppid": int(ppid),
@@ -190,7 +194,7 @@ def driverscan_visitor(node, accumulator):
     return accumulator
 
 
-def get_pslist():
+def get_pslist(available_automagics):
     """List all the tasks that aren't hidden, unlinked, etc"""
     config_path = "plugins.PsList"
     automagics = automagic.choose_automagic(available_automagics, pslist.PsList)
@@ -213,7 +217,7 @@ def get_psscan():
     return psscan_data
     # text_renderer.PrettyTextRenderer().render(treegrid)
 
-def get_svcscan():
+def get_svcscan(available_automagics):
     """List all of the system services"""
     config_path = "plugins.SvcScan"
     automagics = automagic.choose_automagic(available_automagics, svcscan.SvcScan)
@@ -246,7 +250,7 @@ def get_sockets():
 
     config_path = "plugins.NetScan"
     automagics = automagic.choose_automagic(available_automagics, netscan.NetScan)
-    breakpoint()
+    # breakpoint()
     constructed = plugins.construct_plugin(ctx, automagics, netscan.NetScan, config_path, progress_callback=None, open_method=None)
     treegrid = constructed.run()
     socket_data = []
@@ -254,7 +258,7 @@ def get_sockets():
     return socket_data
 
 
-def run(location, filterfile):
+def run(location):
     """Returns a list of the processes as a JSON string
 
     This analysis demonstrates that volatility can be successfully
@@ -262,17 +266,21 @@ def run(location, filterfile):
     returned to the plugin.
 
     """
-    print("Volatility version: %r" % volatility3.framework.constants.VERSION)
+    # print("Volatility version: %r" % volatility3.framework.constants.VERSION)
+    print("Location:", location)
+    ctx.config["automagic.LayerStacker.single_location"] = location
+    available_automagics = automagic.available(ctx)
+    # breakpoint()
     try:
-        with open(filterfile, "rb") as fobj:
-            filter_data = json.load(fobj)
+        # with open(filterfile, "rb") as fobj:
+        #     filter_data = json.load(fobj)
 
         analysis_results = {
-            "pslist": get_pslist(),
-            "svcscan": get_svcscan(),
-            "sockets": get_sockets(),
-            "process_hashes": get_process_hashes(filter_data),
-            "memory_hashes": get_memory_hashes(filter_data),
+            "pslist": get_pslist(available_automagics),
+            "svcscan": get_svcscan(available_automagics),
+            # "sockets": get_sockets(),
+            # "process_hashes": get_process_hashes(filter_data),
+            # "memory_hashes": get_memory_hashes(filter_data),
         }
     except Exception as err:
         analysis_results = {"error": traceback.format_exc(err)}
@@ -281,11 +289,12 @@ def run(location, filterfile):
     return json_str
 
 if __name__ == "__main__":
-    image = "mymem.dd"
-    ctx = contexts.Context()
-    ctx.config["automagic.LayerStacker.single_location"] = f"file:{image}"
-    available_automagics = automagic.available(ctx)
-    svcs = get_svcscan()
+    import argparse
 
-    # with open("svcs3.json", 'w') as f:
-    #     json.dump(svcs, f, indent=None, separators=(',\n', ': '))
+    parser = argparse.ArgumentParser(description="Test analysis")
+    parser.add_argument("--location", default="file:mymem.dd")
+    args = parser.parse_args()
+    print(run(args.location))
+
+
+### Must end with this comment
