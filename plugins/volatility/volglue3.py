@@ -192,16 +192,24 @@ def get_memory_hashes(filter_data):
 def socket_visitor(node, accumulator):
     if node.values:
         proto, laddr, lport, raddr, rport, state, pid, owner = node.values[1:9]
+        state = "STATELESS" if state == "" else state
+        laddr = "::" if type(laddr) == volatility3.framework.renderers.UnreadableValue else laddr
+        pid = -1 if type(pid) == volatility3.framework.renderers.UnreadableValue else int(pid)
+        owner = "" if type(owner) == volatility3.framework.renderers.UnreadableValue else owner
+        raddr = "::" if type(raddr) == volatility3.framework.renderers.UnreadableValue else raddr
+
         sdata = {
             "pid": pid,
             "owner": owner,
             "proto": proto,
             "local_addr": laddr,
-            "local_port": lport,
+            "local_port": int(lport),
             "remote_addr": raddr,
             "remote_port": rport,
             "state": state,
         }
+        # print(sdata)
+        # breakpoint()
         accumulator.append(sdata)
     return accumulator
 
@@ -332,12 +340,7 @@ def run(location):
 
     """
     # print("Volatility version: %r" % volatility3.framework.constants.VERSION)
-    print("Location:", location)
-    # socat_command = f"socat -u UNIX-CONNECT:{location[6:]} - > mem.dd"
-    # output = subprocess.run(socat_command, check=True, shell=True)
-    # print("Output:", output)
     ctx.config["automagic.LayerStacker.single_location"] = location
-    # ctx.config["automagic.QemuSuspend.single_location"] = location
     available_automagics = automagic.available(ctx)
     # socket_path = location[6:]
     # breakpoint()
@@ -351,7 +354,7 @@ def run(location):
         analysis_results = {
             "pslist": get_pslist(available_automagics, location),
             "svcscan": get_svcscan(available_automagics),
-            # "sockets": get_sockets(available_automagics),
+            "sockets": get_sockets(available_automagics),
             # "process_hashes": get_process_hashes(filter_data),
             # "memory_hashes": get_memory_hashes(filter_data),
         }
