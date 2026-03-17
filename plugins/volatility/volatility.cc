@@ -36,7 +36,7 @@ char g_profile[512] = {0};
 
 // Constants
 #define SOCKET_PATH_FMT "/tmp/panda%d.sock"
-char g_location[512] = "file://\0";
+char g_location[512] = "file:\0";
 char g_filter_path[512] = {0};
 const char g_script_name[] = "/volglue3.py";
 
@@ -71,6 +71,56 @@ void uninit_plugin(void*);
 int run_volatility_analysis(CPUState* env);
 bool log_analysis_results(CPUState* env, const char* data);
 
+static const uint8_t _zero_block[1024] = {0};
+static void actually_dump_physical_memory(FILE* out, size_t len)
+{
+    hwaddr addr = 0;
+    uint8_t block[sizeof(_zero_block)];
+
+    if (!out)
+        return;
+
+    while (len != 0)
+    {
+        size_t l = sizeof(block);
+        if (l > len)
+            l = len;
+        if (panda_physical_memory_read(addr, block, l) == MEMTX_OK)
+            fwrite(block, 1, l, out);
+        else
+            fwrite(_zero_block, 1, l, out);
+        addr += l;
+        len -= l;
+    }
+}
+
+static void dump_memory(char* filename, char* register_filename, uint64_t pmem_len){
+    FILE* out = fopen(filename, "wb");
+
+    if (pmem_len == 0){
+        // dump all memory if not specified as arg
+        pmem_len = ram_size;
+    }
+
+    actually_dump_physical_memory(out, pmem_len);
+    fclose(out);
+    if (register_filename)
+    {
+        if ((out = fopen(register_filename, "w")) != NULL)
+        {
+            CPUState* cpu;
+            CPU_FOREACH(cpu)
+            {
+                fprintf(out, "CPU#%d\n", cpu->cpu_index);
+                cpu_dump_state(cpu, out, fprintf, CPU_DUMP_FPU);
+            }
+            fclose(out);
+        }
+    }
+
+    panda_replay_end();
+}
+
 /**
  * Run the volatility analysis, passing the desired profile and args
  * as python strings. Stores the results in the panda log or writes them
@@ -80,6 +130,7 @@ int run_volatility_analysis(CPUState* env)
 {
     // Convert global strings to python strings
     // PyObject* pprofile_str = PyUnicode_FromString(g_profile);
+    dump_memory("mem.ram", "mem.regs.txt", 0);
     PyObject* plocation_str = PyUnicode_FromString(g_location);
     fprintf(stdout, "Location: %s\n", g_location);
     // PyObject* pfilter_str = PyUnicode_FromString(g_filter_path);
@@ -314,8 +365,8 @@ bool init_plugin(void* self)
         fprintf(stderr, "[%s] Failed to allocate memory for socket path\n", __FILE__);
         return false;
     }
-    sprintf(socket_path, SOCKET_PATH_FMT, getpid());
-    strncat(g_location, socket_path, sizeof(g_location) - 1);
+    // sprintf(socket_path, SOCKET_PATH_FMT, getpid());
+    strncat(g_location, "mem.ram", sizeof(g_location) - 1);
 
     const char* python_script = panda_parse_string(vol_args, "script", g_script_path);
 
@@ -364,10 +415,10 @@ bool init_plugin(void* self)
 
     fprintf(stdout, "Successfully initialized python routines.\n");
 
-    if (!start_memory_server(socket_path)) {
-        fprintf(stderr, "[%s] Failed to start memory server!\n", __FILE__);
-        goto cleanup;
-    }
+    // if (!start_memory_server(socket_path)) {
+    //     fprintf(stderr, "[%s] Failed to start memory server!\n", __FILE__);
+    //     goto cleanup;
+    // }
 
     if (script_contents) {
         free(script_contents);
@@ -399,14 +450,18 @@ cleanup:
     pmodule = NULL;
     Py_XDECREF(g_pfunc);
     g_pfunc = NULL;
+    unlink("mem.ram");
+    unlink("mem.regs.txt");
     return false;
 }
 
 void uninit_plugin(void* self)
 {
-    stop_memory_server();
+    // stop_memory_server();
     Py_XDECREF(g_pfunc);
     g_pfunc = NULL;
     Py_Finalize();
     teardown_avro();
+    unlink("mem.ram");
+    unlink("mem.regs.txt");
 }

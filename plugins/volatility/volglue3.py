@@ -7,7 +7,9 @@
 # and take the profile as an argument
 import os
 import json
+import logging
 import shutil
+import subprocess
 import hashlib
 import tempfile
 import traceback
@@ -19,8 +21,69 @@ from volatility3.framework.interfaces.context import ModuleInterface, ModuleCont
 from volatility3.framework import automagic, contexts, interfaces, plugins
 
 
-ctx = contexts.Context()
+import socket
+from typing import Optional
 
+vollog = logging.getLogger(__name__)
+
+class UnixSocketFileHandler(interfaces.plugins.FileHandlerInterface):
+    def __init__(self, socket_path: str, filename: str) -> None:
+        """Initializes the UnixSocketFileHandler."""
+        super().__init__(filename)
+        self.socket_path = socket_path
+        self.sock: Optional[socket.socket] = None
+        self.file: Optional[socket.SocketIO] = None
+
+    def open(self):
+        """Connects to the existing Unix domain socket and wraps it in a file-like interface."""
+        try:
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.connect(self.socket_path)
+            # Wrap the socket in a file-like interface
+            self.file = self.sock.makefile(mode="rwb")
+        except FileNotFoundError:
+            raise Exception(f"Socket file not found: {self.socket_path}")
+        except PermissionError:
+            raise Exception(f"Permission denied for socket: {self.socket_path}")
+        except Exception as e:
+            raise Exception(f"Failed to connect to Unix domain socket: {e}")
+
+    def read(self, buffer_size: int = 1024) -> bytes:
+        """Reads data from the socket."""
+        if self.file is None:
+            raise Exception("Socket is not connected")
+        return self.file.read(buffer_size)
+
+    def write(self, data: bytes):
+        """Writes data to the socket."""
+        if self.file is None:
+            raise Exception("Socket is not connected")
+        self.file.write(data)
+        self.file.flush()
+
+    def close(self):
+        """Closes the socket connection."""
+        if self.file is not None:
+            self.file.close()
+            self.file = None
+        if self.sock is not None:
+            self.sock.close()
+            self.sock = None
+
+    @staticmethod
+    def sanitize_filename(filename: str) -> str:
+        """Sanitizes the filename to ensure only a specific allow list of characters is allowed through."""
+        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.- ()[]{}!$%^#~,"
+        result = ""
+        for char in filename:
+            if char in allowed:
+                result += char
+            else:
+                result += "_"  # change unwanted chars to an underscore
+        return result
+
+
+ctx = contexts.Context()
 
 
 def filter_invalid_ascii(strobj):
@@ -194,10 +257,12 @@ def driverscan_visitor(node, accumulator):
     return accumulator
 
 
-def get_pslist(available_automagics):
+def get_pslist(available_automagics, socket_path):
     """List all the tasks that aren't hidden, unlinked, etc"""
     config_path = "plugins.PsList"
     automagics = automagic.choose_automagic(available_automagics, pslist.PsList)
+    # breakpoint()
+    # constructed = plugins.construct_plugin(ctx, automagics, pslist.PsList, config_path, progress_callback=None, open_method=lambda filename: UnixSocketFileHandler(socket_path, filename))
     constructed = plugins.construct_plugin(ctx, automagics, pslist.PsList, config_path, progress_callback=None, open_method=None)
     # breakpoint()
     treegrid = constructed.run()
@@ -225,7 +290,7 @@ def get_svcscan(available_automagics):
     treegrid = constructed.run()
     svcscan_data = []
     treegrid.visit(node=None, function=svcscan_visitor, initial_accumulator=svcscan_data)
-    driverscan_data = get_driverscan()
+    driverscan_data = get_driverscan(available_automagics)
 
     for svc in svcscan_data:
         for drv in driverscan_data:
@@ -234,7 +299,7 @@ def get_svcscan(available_automagics):
     return svcscan_data
 
 
-def get_driverscan():
+def get_driverscan(available_automagics):
     from volatility3.plugins.windows import driverscan # Imported here because circular import error when at top of file
     config_path = "plugins.DriverScan"
     automagics = automagic.choose_automagic(available_automagics, driverscan.DriverScan)
@@ -245,7 +310,7 @@ def get_driverscan():
     return driverscan_data
 
 
-def get_sockets():
+def get_sockets(available_automagics):
     """List all of the sockets that have not been unlinked or hidden"""
 
     config_path = "plugins.NetScan"
@@ -268,17 +333,25 @@ def run(location):
     """
     # print("Volatility version: %r" % volatility3.framework.constants.VERSION)
     print("Location:", location)
+    # socat_command = f"socat -u UNIX-CONNECT:{location[6:]} - > mem.dd"
+    # output = subprocess.run(socat_command, check=True, shell=True)
+    # print("Output:", output)
     ctx.config["automagic.LayerStacker.single_location"] = location
+    # ctx.config["automagic.QemuSuspend.single_location"] = location
     available_automagics = automagic.available(ctx)
+    # socket_path = location[6:]
+    # breakpoint()
+    # unix_socket_handler = UnixSocketFileHandler(socket_path, location[12:])
+    # unix_socket_handler.open()
     # breakpoint()
     try:
         # with open(filterfile, "rb") as fobj:
         #     filter_data = json.load(fobj)
 
         analysis_results = {
-            "pslist": get_pslist(available_automagics),
+            "pslist": get_pslist(available_automagics, location),
             "svcscan": get_svcscan(available_automagics),
-            # "sockets": get_sockets(),
+            # "sockets": get_sockets(available_automagics),
             # "process_hashes": get_process_hashes(filter_data),
             # "memory_hashes": get_memory_hashes(filter_data),
         }
