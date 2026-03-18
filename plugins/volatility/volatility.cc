@@ -50,6 +50,7 @@ bool g_check_for_process = true;
 bool g_targeted = true;
 
 static PyObject* g_pfunc = NULL;
+PyConfig config;
 
 #define CHECK_OR_DIE(_obj, _emsg, _elabel)                                               \
     do {                                                                                 \
@@ -389,11 +390,24 @@ bool init_plugin(void* self)
         return false;
     }
 
+    const char* venv_path_cstr = std::getenv("VIRTUAL_ENV");
+    std::string venv_path(venv_path_cstr);
+    std::string exec_path = venv_path + "/bin/python";
+    std::wstring w_venv_path(venv_path.begin(), venv_path.end());
+    std::wstring w_exec(exec_path.begin(), exec_path.end());
+
     Py_SetProgramName((wchar_t*) g_program_name);
-    Py_Initialize();
-    PyRun_SimpleString("import sys; from pathlib import Path");
-    PyRun_SimpleString("sys.path.append(f'{Path.home()}/.pyenv/versions/vol3/lib/python3.8/site-packages')");
-    PyRun_SimpleString("sys.path.append(f'{Path.home()}/volatility3')");
+    PyConfig_InitPythonConfig(&config);
+    PyConfig_SetString(&config, &config.executable, w_exec.c_str());
+    Py_InitializeFromConfig(&config);
+    // Py_Initialize();
+    // std::string cmd = "sys.path.append('";
+    // cmd += venv_path;
+    // cmd += "/lib/python3.8/site-packages')";
+    // std::cout << cmd << std::endl;
+    // PyRun_SimpleString("import sys; from pathlib import Path");
+    // PyRun_SimpleString(cmd.c_str());
+    // PyRun_SimpleString("sys.path.append(f'{Path.home()}/volatility3')");
 
     // Load the program as a code object
     pcode = Py_CompileString(script_contents, "volglue3.py", Py_file_input);
@@ -450,6 +464,7 @@ cleanup:
     pmodule = NULL;
     Py_XDECREF(g_pfunc);
     g_pfunc = NULL;
+    PyConfig_Clear(&config);
     unlink("mem.ram");
     unlink("mem.regs.txt");
     return false;
@@ -460,6 +475,7 @@ void uninit_plugin(void* self)
     // stop_memory_server();
     Py_XDECREF(g_pfunc);
     g_pfunc = NULL;
+    PyConfig_Clear(&config);
     Py_Finalize();
     teardown_avro();
     unlink("mem.ram");
