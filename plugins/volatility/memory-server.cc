@@ -28,6 +28,19 @@ extern "C" {
 #define SUCCESS_CODE 0x79
 #define FAILURE_CODE 0x77
 
+#include <stdio.h>
+
+int file_exists_access(const char *filename) {
+    // F_OK tests for existence of the file
+    if (access(filename, F_OK) == 0) {
+        return 1; // File exists
+    } else {
+        fprintf(stderr, "Error checking file existence: %s (errno: %d)\n", filename, errno);
+        return 0; // File does not exist or an error occurred
+    }
+}
+
+
 struct __attribute__((__packed__)) request {
     uint64_t type;    // {QUIT, READ, QUERY_SIZE}_MESSAGE, ... rest reserved
     uint64_t address; // address to read from
@@ -299,6 +312,15 @@ static int setup_socket(char* path, struct sockaddr_un* address,
         fprintf(stderr, "[%s] QemuMemoryAccess: bind failed\n", __FILE__);
         return -2;
     }
+    if (!file_exists_access(path)) {
+        fprintf(stdout, "%s not exists\n", path);
+        exit(1);
+    }
+    if (chmod(path, 0777) != 0) {
+        fprintf(stderr, "Failed to set permissions for %s\n", path);
+        exit(1);
+    }
+
     if (listen(socket_fd, 0) != 0) {
         fprintf(stderr, "[%s] QemuMemoryAccess: listen failed\n", __FILE__);
         return -3;
