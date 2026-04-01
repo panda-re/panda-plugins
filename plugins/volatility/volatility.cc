@@ -131,25 +131,25 @@ int run_volatility_analysis(CPUState* env)
 {
     // Convert global strings to python strings
     // PyObject* pprofile_str = PyUnicode_FromString(g_profile);
-    dump_memory("mem.ram", "mem.regs.txt", 0);
+    dump_memory("mem.ram", "mem.regs.txt", 100);
     PyObject* plocation_str = PyUnicode_FromString(g_location);
     fprintf(stdout, "Location: %s\n", g_location);
-    // PyObject* pfilter_str = PyUnicode_FromString(g_filter_path);
+    PyObject* pfilter_str = PyUnicode_FromString(g_filter_path);
 
-    PyObject* pargs = PyTuple_New(1);
+    PyObject* pargs = PyTuple_New(2);
 
     // Mildly concerned about death-by-oom
     if (!plocation_str) {
         fprintf(stderr, "[%s] Failed to allocate args\n", __FILE__);
         // Py_XDECREF(pprofile_str);
         Py_XDECREF(plocation_str);
-        // Py_XDECREF(pfilter_str);
+        Py_XDECREF(pfilter_str);
         Py_XDECREF(pargs);
     }
 
     // Add these strings to an argument object
     PyTuple_SetItem(pargs, 0, plocation_str);
-    // PyTuple_SetItem(pargs, 1, pfilter_str);
+    PyTuple_SetItem(pargs, 1, pfilter_str);
 
     // Call run(location)
     PyObject* pvalue = PyObject_CallObject(g_pfunc, pargs);
@@ -242,8 +242,8 @@ void before_block_exec(CPUState* env, TranslationBlock* tb)
         free_process(g_current_process);
 
         g_current_process = kosi_get_current_process(kosi);
-        // g_targeted = g_filter->thread_check(process_get_pid(g_current_process),
-        //                                     process_get_asid(g_current_process));
+        g_targeted = g_filter->thread_check(process_get_pid(g_current_process),
+                                            process_get_asid(g_current_process));
 
         g_check_for_process = false;
     }
@@ -256,15 +256,15 @@ void before_block_exec(CPUState* env, TranslationBlock* tb)
     auto asid = process_get_asid(g_current_process);
     auto tid = kosi_get_current_tid(kosi);
 
-    // if (!g_filter->thread_check(pid, asid, tid)) {
-    //     return;
-    // }
+    if (!g_filter->thread_check(pid, asid, tid)) {
+        return;
+    }
 
     run_volatility_analysis(env);
 
     // remove the thread now that we've handled it and make
     // the next bb refresh state info
-    // g_filter->remove_thread(pid, asid, tid);
+    g_filter->remove_thread(pid, asid, tid);
     g_check_for_process = true;
 
     return;
@@ -342,11 +342,11 @@ bool init_plugin(void* self)
     panda_arg_list* vol_args = panda_get_args("volatility");
     output_path = panda_parse_string(vol_args, "output", "volatility.panda");
 
-    // panda_arg_list* filter_args = panda_get_args("filter");
-    // filter_path = panda_parse_string(filter_args, "file", "");
-    // strncpy(g_filter_path, filter_path, sizeof(g_filter_path) - 1);
-    // g_filter.reset(new InstrumentationFilter(g_filter_path));
-    // panda_free_args(filter_args);
+    panda_arg_list* filter_args = panda_get_args("filter");
+    filter_path = panda_parse_string(filter_args, "file", "");
+    strncpy(g_filter_path, filter_path, sizeof(g_filter_path) - 1);
+    g_filter.reset(new InstrumentationFilter(g_filter_path));
+    panda_free_args(filter_args);
 
     if (init_avro(output_path)) {
         return false;
@@ -400,14 +400,6 @@ bool init_plugin(void* self)
     PyConfig_InitPythonConfig(&config);
     PyConfig_SetString(&config, &config.executable, w_exec.c_str());
     Py_InitializeFromConfig(&config);
-    // Py_Initialize();
-    // std::string cmd = "sys.path.append('";
-    // cmd += venv_path;
-    // cmd += "/lib/python3.8/site-packages')";
-    // std::cout << cmd << std::endl;
-    // PyRun_SimpleString("import sys; from pathlib import Path");
-    // PyRun_SimpleString(cmd.c_str());
-    // PyRun_SimpleString("sys.path.append(f'{Path.home()}/volatility3')");
 
     // Load the program as a code object
     pcode = Py_CompileString(script_contents, "volglue3.py", Py_file_input);

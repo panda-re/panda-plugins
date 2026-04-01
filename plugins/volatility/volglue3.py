@@ -94,7 +94,7 @@ def is_interesting(eprocess, filter_data):
     check_pid = int(eprocess.UniqueProcessId)
     check_asid = int(eprocess.Pcb.DirectoryTableBase)
 
-    for (pid, tid, asid) in filter_data["threads"]:
+    for (pid, tid, asid) in filter_data["thread_whitelist"]:
         if check_pid == int(pid) and check_asid == int(asid):
             return True
     return False
@@ -113,9 +113,11 @@ def hash_file(filepath, *algorithms):
     return {a.name: a.hexdigest().lower() for a in algorithms}
 
 
-def get_process_hashes():
+def get_process_hashes(available_automagics, filter_data):
     config_path = "plugins.PEDump"
-    automagics = automagic.choose_automagic(available_automagics, pedump.PEDump)
+    # dump = pedump.PEDump(ctx, config_path, file_name=args.location)
+    # breakpoint()
+    automagics = automagic.choose_automagic(available_automagics, pedump.PEDump, base=0)
     # breakpoint()
     constructed = plugins.construct_plugin(ctx, automagics, pedump.PEDump, config_path, progress_callback=None, open_method=None)
     treegrid = constructed.run()
@@ -331,7 +333,7 @@ def get_sockets(available_automagics):
     return socket_data
 
 
-def run(location):
+def run(location, filterfile):
     """Returns a list of the processes as a JSON string
 
     This analysis demonstrates that volatility can be successfully
@@ -348,14 +350,14 @@ def run(location):
     # unix_socket_handler.open()
     # breakpoint()
     try:
-        # with open(filterfile, "rb") as fobj:
-        #     filter_data = json.load(fobj)
+        with open(filterfile, "rb") as fobj:
+            filter_data = json.load(fobj)
 
         analysis_results = {
             "pslist": get_pslist(available_automagics, location),
             "svcscan": get_svcscan(available_automagics),
             "sockets": get_sockets(available_automagics),
-            # "process_hashes": get_process_hashes(filter_data),
+            # "process_hashes": get_process_hashes(available_automagics, filter_data),
             # "memory_hashes": get_memory_hashes(filter_data),
         }
     except Exception as err:
