@@ -2,6 +2,12 @@
 #define __STDC_FORMAT_MACROS
 #define OSI_TEST_ON_ASID_CHANGED
 
+extern "C" {
+    #include <Python.h>
+    #include <dlfcn.h>
+    #include <errno.h>
+}
+
 #include "panda/plugin.h"
 #include "panda/plugin_plugin.h"
 #include "panda/common.h"
@@ -21,7 +27,7 @@ extern "C" {
     // #include "osi/osi_types.h"
     // #include "panda/plugins/osi/osi_ext.h"
     // #include "panda/plugins/osi/os_intro.h"
-    // #include "panda/plugins/osi_linux/default_profile.h"
+    #include "panda/plugins/osi_linux/default_profile.h"
     #include "panda/plugins/osi_linux/kernel_profile.h"
     #include "panda/plugins/dynamic_symbols/dynamic_symbols_int_fns.h"
     #include "panda/plugins/hooks/hooks_int_fns.h"  
@@ -75,6 +81,13 @@ static std::shared_ptr<IntroPANDAManager> os_manager;
 
 static int id = 9;
 static bool hook_registered = false;
+
+char g_program_name[] = "log_plugin";
+char g_module_name[] = "gluemod";
+char g_script_path[4096] = {0};
+
+static PyObject* g_pfunc = NULL;
+PyConfig config;
 
 
 bool init_log_detect(CPUState* env) {
@@ -283,7 +296,7 @@ void register_hook(CPUState* env, TranslationBlock* tb) {
     if (hook_registered) {
         return;
     }
-    struct symbol_hook h = {0};3
+    struct symbol_hook h = {0};
     strncpy(h.name, "syslog", 256);
     h.cb.start_block_exec = syslog_block_hook;
     h.type = PANDA_CB_START_BLOCK_EXEC;
