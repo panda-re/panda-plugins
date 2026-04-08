@@ -122,6 +122,29 @@ static void dump_memory(char* filename, char* register_filename, uint64_t pmem_l
     panda_replay_end();
 }
 
+static void dump_memory_tb(char* filename, hwaddr start_addr, size_t len) {
+    FILE* out = fopen(filename, "wb");
+    if (!out) {
+        fprintf(stderr, "Failed to open file for memory dump: %s\n", filename);
+        return;
+    }
+
+    uint8_t block[1024]; // Adjust block size as needed
+    while (len != 0) {
+        size_t l = sizeof(block);
+        if (l > len)
+            l = len;
+        if (panda_physical_memory_read(start_addr, block, l) == MEMTX_OK)
+            fwrite(block, 1, l, out);
+        else
+            fwrite(_zero_block, 1, l, out);
+        start_addr += l;
+        len -= l;
+    }
+
+    fclose(out);
+}
+
 /**
  * Run the volatility analysis, passing the desired profile and args
  * as python strings. Stores the results in the panda log or writes them
@@ -131,7 +154,7 @@ int run_volatility_analysis(CPUState* env)
 {
     // Convert global strings to python strings
     // PyObject* pprofile_str = PyUnicode_FromString(g_profile);
-    dump_memory("mem.ram", "mem.regs.txt", 100);
+    // dump_memory("mem.ram", "mem.regs.txt", 100);
     PyObject* plocation_str = PyUnicode_FromString(g_location);
     fprintf(stdout, "Location: %s\n", g_location);
     PyObject* pfilter_str = PyUnicode_FromString(g_filter_path);
@@ -248,9 +271,14 @@ void before_block_exec(CPUState* env, TranslationBlock* tb)
         g_check_for_process = false;
     }
 
-    if (!g_targeted) {
-        return;
-    }
+    // if (!g_targeted) {
+    //     printf("In not gtargeted\n");
+    //     return;
+    // }
+
+    hwaddr tb_start_addr = tb->pc;
+    size_t tb_length = tb->size;
+    // fprintf(stdout, "PC: %lu, Size: %d\n", tb_start_addr, tb_length);
 
     auto pid = process_get_pid(g_current_process);
     auto asid = process_get_asid(g_current_process);
@@ -259,7 +287,7 @@ void before_block_exec(CPUState* env, TranslationBlock* tb)
     if (!g_filter->thread_check(pid, asid, tid)) {
         return;
     }
-
+    dump_memory_tb("mem.ram", tb_start_addr, tb_length);
     run_volatility_analysis(env);
 
     // remove the thread now that we've handled it and make
@@ -458,7 +486,7 @@ cleanup:
     g_pfunc = NULL;
     PyConfig_Clear(&config);
     unlink("mem.ram");
-    unlink("mem.regs.txt");
+    // unlink("mem.regs.txt");
     return false;
 }
 
@@ -471,5 +499,5 @@ void uninit_plugin(void* self)
     Py_Finalize();
     teardown_avro();
     unlink("mem.ram");
-    unlink("mem.regs.txt");
+    // unlink("mem.regs.txt");
 }
