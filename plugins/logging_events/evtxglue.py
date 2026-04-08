@@ -1,16 +1,22 @@
-import evtxtract
+import evtxtract, json, traceback
+from collections import defaultdict
 
 def run(imagename):
     with open(imagename, 'rb') as f:
         buf = f.read()
     offsets = evtxtract.carvers.find_evtx_records(buf)
 
-    records = []
+    analysis_results = defaultdict(list)
     for offset in offsets:
-        record = evtxtract.carvers.extract_record(buf, offset)
-        records.append(record)
+        try:
+            record = evtxtract.carvers.extract_record(buf, offset)
+            analysis_results[record.substitutions[14][1]].append(str(record))
+            records.append(record)
+        except Exception:
+            continue
     
-    return records
+    json_str = json.dumps(analysis_results, indent=1)
+    return json_str
 
 if __name__ == "__main__":
     import argparse
