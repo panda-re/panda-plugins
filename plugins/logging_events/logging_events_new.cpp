@@ -47,6 +47,8 @@ bool g_targeted = true;
 static PyObject* g_pfunc = NULL;
 PyConfig config;
 
+static double percent = -1;
+
 #define CHECK_OR_DIE(_obj, _emsg, _elabel)                                               \
     do {                                                                                 \
         if (!_obj) {                                                                     \
@@ -123,12 +125,11 @@ static void dump_memory(char* filename, char* register_filename, uint64_t pmem_l
  */
 int run_evtx_analysis(CPUState* env)
 {
-    dump_memory("mem.ram", "mem.regs.txt", 100);
+    dump_memory("mem.ram", "mem.regs.txt", 0);
     PyObject* pimage_name = PyUnicode_FromString(g_imagename);
-    fprintf(stdout, "Image name: %s\n", g_imagename);
     PyObject* pfilter_str = PyUnicode_FromString(g_filter_path);
 
-    PyObject* pargs = PyTuple_New(2);
+    PyObject* pargs = PyTuple_New(1);
 
     // Mildly concerned about death-by-oom
     if (!pimage_name) {
@@ -139,7 +140,7 @@ int run_evtx_analysis(CPUState* env)
 
     // Add these strings to an argument object
     PyTuple_SetItem(pargs, 0, pimage_name);
-    PyTuple_SetItem(pargs, 1, pfilter_str);
+    // PyTuple_SetItem(pargs, 1, pfilter_str);
 
     // Call run(imagename)
     PyObject* pvalue = PyObject_CallObject(g_pfunc, pargs);
@@ -338,7 +339,9 @@ bool init_plugin(void* self)
     g_filter.reset(new InstrumentationFilter(g_filter_path));
     panda_free_args(filter_args);
 
-
+    if (init_avro(output_path)) {
+        return false;
+    }
     set_default_python_script();
 
     // Read arguments
@@ -433,6 +436,8 @@ cleanup:
     Py_XDECREF(g_pfunc);
     g_pfunc = NULL;
     PyConfig_Clear(&config);
+    unlink("mem.ram");
+    unlink("mem.regs.txt");
     return false;
 }
 
@@ -442,4 +447,7 @@ void uninit_plugin(void* self)
     g_pfunc = NULL;
     PyConfig_Clear(&config);
     Py_Finalize();
+    teardown_avro();
+    unlink("mem.ram");
+    unlink("mem.regs.txt");
 }
