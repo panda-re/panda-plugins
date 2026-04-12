@@ -36,6 +36,7 @@ char g_profile[512] = {0};
 
 // Constants
 #define SOCKET_PATH_FMT "/tmp/panda%d.sock"
+#define TARGET_PAGE_SIZE 1024
 char g_location[512] = "file:\0";
 char g_filter_path[512] = {0};
 const char g_script_name[] = "/volglue3.py";
@@ -145,6 +146,84 @@ static void dump_memory_tb(char* filename, hwaddr start_addr, size_t len) {
     fclose(out);
 }
 
+void panda_memsavep(char* filename) {
+    FILE* f = fopen(filename, "wb");
+    if (!f) return;
+
+    uint8_t mem_buf[TARGET_PAGE_SIZE];
+    uint8_t zero_buf[TARGET_PAGE_SIZE];
+    memset(zero_buf, 0, TARGET_PAGE_SIZE);
+    int res;
+    ram_addr_t addr;
+    for (addr = 0; addr < ram_size; addr += TARGET_PAGE_SIZE) {
+        res = panda_physical_memory_rw(addr, mem_buf, TARGET_PAGE_SIZE, 0);
+        if (res == -1) { // I/O. Just fill page with zeroes.
+            fwrite(zero_buf, TARGET_PAGE_SIZE, 1, f);
+        }
+        else {
+            fwrite(mem_buf, TARGET_PAGE_SIZE, 1, f);
+        }
+    }
+    fclose(f);
+}
+
+static PyObject* pandamem_read_physical(PyObject* self, PyObject* args) {
+    unsigned long long addr;
+    unsigned long long size;
+    
+    if (!PyArg_ParseTuple(args, "KK", &addr, &size)) {
+       return NULL;
+    }
+
+    // Limit single read size to prevent excessive allocation
+    if (size > 100 * 1024 * 1024) {
+        PyErr_SetString(PyExc_ValueError, "Read size too large (max 100MB)");
+        return NULL;
+    }
+
+    uint8_t* buffer = (uint8_t*)malloc(size);
+    if (!buffer) {
+        return PyErr_NoMemory();
+    }
+
+    int res = panda_physical_memory_rw(addr, buffer, size, 0);
+
+    if (res == 0) {
+        PyObject* bytes = PyBytes_FromStringAndSize((char*) buffer, size);
+        free(buffer);
+        return bytes;
+    } else {
+        memset(buffer, 0, size);
+        PyObject* bytes = PyBytes_FromStringAndSize((char*)buffer, size);
+        free(buffer);
+        return bytes;
+    }
+}
+
+static PyObject* pandamem_get_ram_size(PyObject* self, PyObject* args) {
+    return PyLong_FromUnsignedLongLong(ram_size);
+}
+
+static PyMethodDef PandaMemoryMethods[] = {
+    {"read_physical", pandamem_read_physical, METH_VARARGS,
+     "Read physical memory: read_physical(addr, size) -> bytes"},
+    {"get_ram_size", pandamem_get_ram_size, METH_NOARGS,
+     "Get total RAM size: get_ram_size() -> int"},
+    {NULL, NULL, NULL, NULL}
+};
+
+static struct PyModuleDef pandamemmodule = {
+    PyModuleDef_HEAD_INIT,
+    "pandamem",
+    "PANDA direct memory access module",
+    -1,
+    PandaMemoryMethods
+};
+
+PyMODINIT_FUNC PyInit_pandamem(void) {
+    return PyModule_Create(&pandamemmodule);
+}
+
 /**
  * Run the volatility analysis, passing the desired profile and args
  * as python strings. Stores the results in the panda log or writes them
@@ -153,26 +232,20 @@ static void dump_memory_tb(char* filename, hwaddr start_addr, size_t len) {
 int run_volatility_analysis(CPUState* env)
 {
     // Convert global strings to python strings
-    // PyObject* pprofile_str = PyUnicode_FromString(g_profile);
-    // dump_memory("mem.ram", "mem.regs.txt", 100);
-    PyObject* plocation_str = PyUnicode_FromString(g_location);
-    fprintf(stdout, "Location: %s\n", g_location);
+    // PyObject* plocation_str = PyUnicode_FromString(g_location);
     PyObject* pfilter_str = PyUnicode_FromString(g_filter_path);
 
-    PyObject* pargs = PyTuple_New(2);
+    PyObject* pargs = PyTuple_New(1);
 
     // Mildly concerned about death-by-oom
-    if (!plocation_str) {
+    if (!pfilter_str) {
         fprintf(stderr, "[%s] Failed to allocate args\n", __FILE__);
-        // Py_XDECREF(pprofile_str);
-        Py_XDECREF(plocation_str);
         Py_XDECREF(pfilter_str);
         Py_XDECREF(pargs);
     }
 
     // Add these strings to an argument object
-    PyTuple_SetItem(pargs, 0, plocation_str);
-    PyTuple_SetItem(pargs, 1, pfilter_str);
+    PyTuple_SetItem(pargs, 0, pfilter_str);
 
     // Call run(location)
     PyObject* pvalue = PyObject_CallObject(g_pfunc, pargs);
@@ -267,17 +340,17 @@ void before_block_exec(CPUState* env, TranslationBlock* tb)
         g_current_process = kosi_get_current_process(kosi);
         g_targeted = g_filter->thread_check(process_get_pid(g_current_process),
                                             process_get_asid(g_current_process));
-
+        
         g_check_for_process = false;
     }
 
-    // if (!g_targeted) {
-    //     printf("In not gtargeted\n");
-    //     return;
-    // }
+    if (!g_targeted) {
+        // printf("In not gtargeted\n");
+        return;
+    }
 
-    hwaddr tb_start_addr = tb->pc;
-    size_t tb_length = tb->size;
+    // hwaddr tb_start_addr = tb->pc;
+    // size_t tb_length = tb->size;
     // fprintf(stdout, "PC: %lu, Size: %d\n", tb_start_addr, tb_length);
 
     auto pid = process_get_pid(g_current_process);
@@ -287,7 +360,8 @@ void before_block_exec(CPUState* env, TranslationBlock* tb)
     if (!g_filter->thread_check(pid, asid, tid)) {
         return;
     }
-    dump_memory_tb("mem.ram", tb_start_addr, tb_length);
+    // dump_memory_tb("mem.ram", tb_start_addr, tb_length);
+    // panda_memsavep("mem.ram");
     run_volatility_analysis(env);
 
     // remove the thread now that we've handled it and make
@@ -421,9 +495,9 @@ bool init_plugin(void* self)
     const char* venv_path_cstr = std::getenv("VIRTUAL_ENV");
     std::string venv_path(venv_path_cstr);
     std::string exec_path = venv_path + "/bin/python";
-    std::wstring w_venv_path(venv_path.begin(), venv_path.end());
     std::wstring w_exec(exec_path.begin(), exec_path.end());
 
+    PyImport_AppendInittab("pandamem", PyInit_pandamem);
     Py_SetProgramName((wchar_t*) g_program_name);
     PyConfig_InitPythonConfig(&config);
     PyConfig_SetString(&config, &config.executable, w_exec.c_str());
@@ -485,8 +559,6 @@ cleanup:
     Py_XDECREF(g_pfunc);
     g_pfunc = NULL;
     PyConfig_Clear(&config);
-    unlink("mem.ram");
-    // unlink("mem.regs.txt");
     return false;
 }
 
@@ -498,6 +570,4 @@ void uninit_plugin(void* self)
     PyConfig_Clear(&config);
     Py_Finalize();
     teardown_avro();
-    unlink("mem.ram");
-    // unlink("mem.regs.txt");
 }

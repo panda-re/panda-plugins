@@ -14,6 +14,9 @@ import hashlib
 import tempfile
 import traceback
 
+import urllib
+from urllib.request import BaseHandler
+
 import volatility3
 from volatility3.cli import text_renderer
 from volatility3.plugins.windows import pedump, psscan, pslist, svcscan, netscan, vadinfo
@@ -24,67 +27,123 @@ from volatility3.framework import automagic, contexts, interfaces, plugins
 import socket
 from typing import Optional
 
+import pandamem
+
 vollog = logging.getLogger(__name__)
-
-class UnixSocketFileHandler(interfaces.plugins.FileHandlerInterface):
-    def __init__(self, socket_path: str, filename: str) -> None:
-        """Initializes the UnixSocketFileHandler."""
-        super().__init__(filename)
-        self.socket_path = socket_path
-        self.sock: Optional[socket.socket] = None
-        self.file: Optional[socket.SocketIO] = None
-
-    def open(self):
-        """Connects to the existing Unix domain socket and wraps it in a file-like interface."""
-        try:
-            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self.sock.connect(self.socket_path)
-            # Wrap the socket in a file-like interface
-            self.file = self.sock.makefile(mode="rwb")
-        except FileNotFoundError:
-            raise Exception(f"Socket file not found: {self.socket_path}")
-        except PermissionError:
-            raise Exception(f"Permission denied for socket: {self.socket_path}")
-        except Exception as e:
-            raise Exception(f"Failed to connect to Unix domain socket: {e}")
-
-    def read(self, buffer_size: int = 1024) -> bytes:
-        """Reads data from the socket."""
-        if self.file is None:
-            raise Exception("Socket is not connected")
-        return self.file.read(buffer_size)
-
-    def write(self, data: bytes):
-        """Writes data to the socket."""
-        if self.file is None:
-            raise Exception("Socket is not connected")
-        self.file.write(data)
-        self.file.flush()
-
-    def close(self):
-        """Closes the socket connection."""
-        if self.file is not None:
-            self.file.close()
-            self.file = None
-        if self.sock is not None:
-            self.sock.close()
-            self.sock = None
-
-    @staticmethod
-    def sanitize_filename(filename: str) -> str:
-        """Sanitizes the filename to ensure only a specific allow list of characters is allowed through."""
-        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.- ()[]{}!$%^#~,"
-        result = ""
-        for char in filename:
-            if char in allowed:
-                result += char
-            else:
-                result += "_"  # change unwanted chars to an underscore
-        return result
-
+DEBUG = False
 
 ctx = contexts.Context()
 
+class PandaFile(object):
+    """
+    Constructs a file that volatility can't ignore
+    to back by PANDA physical memory
+    """
+    
+    def __init__(self, length):
+        self.pos = 0
+        self.length = length
+        self.closed = False
+        self.mode = "rb"
+        self.name = "panda://memory"
+        self.classname = type(self).__name__
+        self.x86_32 = (length <= 0xffffffff)
+    
+    def readable(self):
+        return self.closed
+    
+    def read(self, size=1):
+        if self.x86_32:
+            addr = self.pos & 0xfffffff
+        else:
+            addr = self.pos
+        
+        data = pandamem.read_physical(addr, size)
+        
+        if DEBUG:
+            print(self.classname+": Reading " + str(size)+" bytes from "+hex(self.pos))
+        
+        self.pos += size
+        return data
+    
+    def peek(self, size=1):
+        return pandamem.read_physical(addr, size)
+    
+    def seek(self, pos, whence=0):
+        if whence == 0:
+            self.pos = pos
+        elif whence == 1:
+            self.pos += pos
+        else:
+            self.pos = self.length - pos
+        if self.pos > self.length:
+            print(self.classname+": We've gone off the deep end")
+        if DEBUG:
+            print(self.classname+" Seeking to address "+hex(self.pos))
+    
+    def tell(self):
+        return self.pos
+    
+    def close(self):
+        self.closed = True
+
+class PandaFileHandler(BaseHandler):
+    def default_open(self, req):
+        if 'panda://' in req.full_url or 'panda.panda' in req.full_url:
+            length = pandamem.get_ram_size()
+            
+            if length > 0xc0000000:
+                length += 0x40000000  # 3GB hole
+            if DEBUG:
+                print(type(self).__name__ + ": initializing PandaFile with length="+hex(length))
+            
+            return PandaFile(length=length)
+        
+        return None
+    
+    def file_close(self):
+        return True
+
+def setup_panda_handler():
+    """
+    Register the panda:// URL handler with urllib.
+    This allows Volatility to open "panda://memory" as if it were a file.
+    """
+    opener = urllib.request.build_opener(PandaFileHandler())
+    urllib.request.install_opener(opener)
+    vollog.info("[PandaFileHandler] Registered panda:// protocol handler")
+
+def test_file_behavior():
+    print(f"\n{'='*60}")
+    print(f"Testing pandamem module...")
+    print(f"{'='*60}")
+    ram_size = pandamem.get_ram_size()
+    print(f"Ram size: {ram_size}")
+    # TEST 1: Can we read from address 0?
+    print("TEST 1: Reading 16 bytes from address 0x0...")
+    try:
+        data = pandamem.read_physical(0, 16)
+        print(f"  SUCCESS: {data.hex()}")
+    except Exception as e:
+        print(f"  FAILED: {e}")
+        return json.dumps({"error": f"pandamem.read_physical failed: {e}"})
+    
+    # TEST 2: Can we read from address 0x1000 (typical page)?
+    print("TEST 2: Reading 4096 bytes from address 0x1000...")
+    try:
+        data = pandamem.read_physical(0x1000, 4096)
+        print(f"  SUCCESS: {data.hex()}")
+    except Exception as e:
+        print(f"  FAILED: {e}")
+    
+    # TEST 3: Can we read a larger chunk?
+    print("TEST 3: Reading 4096 bytes (one page)...")
+    try:
+        data = pandamem.read_physical(0, 4096)
+        print(f"  SUCCESS: Read {len(data)} bytes")
+    except Exception as e:
+        print(f"  FAILED: {e}")
+    print(f"{'='*60}\n")
 
 def filter_invalid_ascii(strobj):
     return strobj.encode("utf-8", "replace")
@@ -267,12 +326,12 @@ def driverscan_visitor(node, accumulator):
     return accumulator
 
 
-def get_pslist(available_automagics, socket_path):
+def get_pslist(available_automagics):
     """List all the tasks that aren't hidden, unlinked, etc"""
     config_path = "plugins.PsList"
     automagics = automagic.choose_automagic(available_automagics, pslist.PsList)
+    print(f"[AUTOMAGICS]: {automagics}")
     # breakpoint()
-    # constructed = plugins.construct_plugin(ctx, automagics, pslist.PsList, config_path, progress_callback=None, open_method=lambda filename: UnixSocketFileHandler(socket_path, filename))
     constructed = plugins.construct_plugin(ctx, automagics, pslist.PsList, config_path, progress_callback=None, open_method=None)
     # breakpoint()
     treegrid = constructed.run()
@@ -333,7 +392,7 @@ def get_sockets(available_automagics):
     return socket_data
 
 
-def run(location, filterfile):
+def run(location):
     """Returns a list of the processes as a JSON string
 
     This analysis demonstrates that volatility can be successfully
@@ -342,19 +401,22 @@ def run(location, filterfile):
 
     """
     # print("Volatility version: %r" % volatility3.framework.constants.VERSION)
+    setup_panda_handler()
+
+    test_file_behavior()
+
+    location = "panda://memory"
     ctx.config["automagic.LayerStacker.single_location"] = location
+    # Build automagics
+    print("Running automagic to build layers...")
     available_automagics = automagic.available(ctx)
-    # socket_path = location[6:]
-    # breakpoint()
-    # unix_socket_handler = UnixSocketFileHandler(socket_path, location[12:])
-    # unix_socket_handler.open()
-    # breakpoint()
+
     try:
-        with open(filterfile, "rb") as fobj:
-            filter_data = json.load(fobj)
+        # with open(filterfile, "rb") as fobj:
+        #     filter_data = json.load(fobj)
 
         analysis_results = {
-            "pslist": get_pslist(available_automagics, location),
+            "pslist": get_pslist(available_automagics),
             "svcscan": get_svcscan(available_automagics),
             "sockets": get_sockets(available_automagics),
             # "process_hashes": get_process_hashes(available_automagics, filter_data),
