@@ -360,8 +360,7 @@ void before_block_exec(CPUState* env, TranslationBlock* tb)
     if (!g_filter->thread_check(pid, asid, tid)) {
         return;
     }
-    // dump_memory_tb("mem.ram", tb_start_addr, tb_length);
-    // panda_memsavep("mem.ram");
+    
     run_volatility_analysis(env);
 
     // remove the thread now that we've handled it and make
@@ -565,6 +564,12 @@ cleanup:
 void uninit_plugin(void* self)
 {
     // stop_memory_server();
+    fprintf(stdout, "\n[VOLATILITY] Running analysis at end of replay...\n");
+    
+    // CPUState* env = first_cpu;
+    // if (env) {
+    //     run_volatility_analysis(env);
+    // }
     Py_XDECREF(g_pfunc);
     g_pfunc = NULL;
     PyConfig_Clear(&config);

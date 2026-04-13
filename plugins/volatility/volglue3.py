@@ -22,7 +22,7 @@ from volatility3.cli import text_renderer
 from volatility3.plugins.windows import pedump, psscan, pslist, svcscan, netscan, vadinfo
 from volatility3.framework.interfaces.context import ModuleInterface, ModuleContainer
 from volatility3.framework import automagic, contexts, interfaces, plugins
-
+from volatility3.framework.layers.physical import FileLayer
 
 import socket
 from typing import Optional
@@ -67,7 +67,7 @@ class PandaFile(object):
         return data
     
     def peek(self, size=1):
-        return pandamem.read_physical(addr, size)
+        return pandamem.read_physical(self.pos, size)
     
     def seek(self, pos, whence=0):
         if whence == 0:
@@ -129,12 +129,12 @@ def test_file_behavior():
         return json.dumps({"error": f"pandamem.read_physical failed: {e}"})
     
     # TEST 2: Can we read from address 0x1000 (typical page)?
-    print("TEST 2: Reading 4096 bytes from address 0x1000...")
-    try:
-        data = pandamem.read_physical(0x1000, 4096)
-        print(f"  SUCCESS: {data.hex()}")
-    except Exception as e:
-        print(f"  FAILED: {e}")
+    # print("TEST 2: Reading 4096 bytes from address 0x1000...")
+    # try:
+    #     data = pandamem.read_physical(0x1000, 4096)
+    #     print(f"  SUCCESS: {data.hex()}")
+    # except Exception as e:
+    #     print(f"  FAILED: {e}")
     
     # TEST 3: Can we read a larger chunk?
     print("TEST 3: Reading 4096 bytes (one page)...")
@@ -328,17 +328,68 @@ def driverscan_visitor(node, accumulator):
 
 def get_pslist(available_automagics):
     """List all the tasks that aren't hidden, unlinked, etc"""
-    config_path = "plugins.PsList"
-    automagics = automagic.choose_automagic(available_automagics, pslist.PsList)
-    print(f"[AUTOMAGICS]: {automagics}")
-    # breakpoint()
-    constructed = plugins.construct_plugin(ctx, automagics, pslist.PsList, config_path, progress_callback=None, open_method=None)
-    # breakpoint()
-    treegrid = constructed.run()
-    pslist_data = []
-    treegrid.visit(node=None, function=pslist_visitor, initial_accumulator=pslist_data)
-    return pslist_data
-    # text_renderer.PrettyTextRenderer().render(treegrid)
+    print("\n" + "="*60)
+    print("[get_pslist] Starting")
+    print("="*60)
+    
+    try:
+        config_path = "plugins.PsList"
+        
+        print("[get_pslist] Choosing automagic...")
+        automagics = automagic.choose_automagic(available_automagics, pslist.PsList)
+        print(f"[get_pslist] Chosen {len(automagics)} automagics")
+        ctx.config['plugins.PsList.PsList.kernel.layer_name'] = 'panda://memory'
+        ctx.config['plugins.PsList.PsList.kernel.symbol_table_name'] = 'symbol_table_name1'
+        print("[get_pslist] Constructing plugin...")
+        constructed = plugins.construct_plugin(
+            ctx, automagics, pslist.PsList, config_path, 
+            progress_callback=None, open_method=None
+        )
+        
+        print(f"[get_pslist] Config after construct:")
+        print(f"  - layer_name: {ctx.config.get('plugins.PsList.kernel.layer_name', 'NOT SET')}")
+        print(f"  - symbol_table: {ctx.config.get('plugins.PsList.kernel.symbol_table_name', 'NOT SET')}")
+        
+        print("[get_pslist] Running plugin...")
+        treegrid = constructed.run()
+        
+        print("[get_pslist] Extracting data...")
+        pslist_data = []
+        treegrid.visit(node=None, function=pslist_visitor, initial_accumulator=pslist_data)
+        
+        print(f"[get_pslist] SUCCESS: Found {len(pslist_data)} processes")
+        print("="*60 + "\n")
+        
+        return pslist_data
+        
+    except Exception as e:
+        print(f"\n[get_pslist] EXCEPTION CAUGHT: {type(e).__name__}")
+        print(f"[get_pslist] Error message: {str(e)}")
+        
+        # Try to extract unsatisfied requirements
+        if hasattr(e, 'unsatisfied'):
+            print(f"[get_pslist] Unsatisfied requirements:")
+            for req in e.unsatisfied:
+                # breakpoint()
+                print(f"  - {req}")
+        
+        # Also check what's in the context
+        print(f"[get_pslist] Context config keys:")
+        for key in sorted(ctx.config.keys()):
+            print(f"  - {key}: {ctx.config[key]}")
+        
+        print(f"[get_pslist] Context layers:")
+        for layer_name in ctx.layers.keys():
+            print(f"  - {layer_name}")
+        
+        print(f"[get_pslist] Context symbol tables:")
+        for symbol in ctx.symbol_space.keys():
+            print(f"  - {symbol}")
+        
+        print("\n" + traceback.format_exc())
+        print("="*60 + "\n")
+        
+        return {"error": str(e), "traceback": traceback.format_exc()}
 
 def get_psscan():
     """List all the tasks including hidden, unlinked, etc"""
@@ -406,7 +457,9 @@ def run(location):
     test_file_behavior()
 
     location = "panda://memory"
-    ctx.config["automagic.LayerStacker.single_location"] = location
+    config_path = "automagic.LayerStacker.single_location"
+    ctx.config[config_path] = location
+    # breakpoint()
     # Build automagics
     print("Running automagic to build layers...")
     available_automagics = automagic.available(ctx)
@@ -422,8 +475,14 @@ def run(location):
             # "process_hashes": get_process_hashes(available_automagics, filter_data),
             # "memory_hashes": get_memory_hashes(filter_data),
         }
-    except Exception as err:
-        analysis_results = {"error": traceback.format_exc(err)}
+    except Exception as e:
+        print(f"ERROR: {e}")
+        print(traceback.format_exc())
+        print(dict(ctx.config))
+        analysis_results = {"error": str(e),
+            "error_type": type(e).__name__,
+            "traceback": traceback.format_exc()
+            }
 
     json_str = json.dumps(analysis_results, indent=1)
     return json_str
