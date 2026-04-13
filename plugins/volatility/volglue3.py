@@ -338,8 +338,6 @@ def get_pslist(available_automagics):
         print("[get_pslist] Choosing automagic...")
         automagics = automagic.choose_automagic(available_automagics, pslist.PsList)
         print(f"[get_pslist] Chosen {len(automagics)} automagics")
-        ctx.config['plugins.PsList.PsList.kernel.layer_name'] = 'panda://memory'
-        ctx.config['plugins.PsList.PsList.kernel.symbol_table_name'] = 'symbol_table_name1'
         print("[get_pslist] Constructing plugin...")
         constructed = plugins.construct_plugin(
             ctx, automagics, pslist.PsList, config_path, 
@@ -454,9 +452,9 @@ def run(location):
     # print("Volatility version: %r" % volatility3.framework.constants.VERSION)
     setup_panda_handler()
 
-    test_file_behavior()
+    # test_file_behavior()
 
-    location = "panda://memory"
+    location = "file:///tmp/panda.panda"
     config_path = "automagic.LayerStacker.single_location"
     ctx.config[config_path] = location
     # breakpoint()
@@ -481,7 +479,7 @@ def run(location):
         print(dict(ctx.config))
         analysis_results = {"error": str(e),
             "error_type": type(e).__name__,
-            "traceback": traceback.format_exc()
+            "traceback": traceback.format_exc(e)
             }
 
     json_str = json.dumps(analysis_results, indent=1)
