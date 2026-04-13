@@ -344,10 +344,10 @@ void before_block_exec(CPUState* env, TranslationBlock* tb)
         g_check_for_process = false;
     }
 
-    if (!g_targeted) {
-        // printf("In not gtargeted\n");
-        return;
-    }
+    // if (!g_targeted) {
+    //     // printf("In not gtargeted\n");
+    //     return;
+    // }
 
     // hwaddr tb_start_addr = tb->pc;
     // size_t tb_length = tb->size;
@@ -564,7 +564,7 @@ cleanup:
 void uninit_plugin(void* self)
 {
     // stop_memory_server();
-    fprintf(stdout, "\n[VOLATILITY] Running analysis at end of replay...\n");
+    // fprintf(stdout, "\n[VOLATILITY] Running analysis at end of replay...\n");
     
     // CPUState* env = first_cpu;
     // if (env) {
