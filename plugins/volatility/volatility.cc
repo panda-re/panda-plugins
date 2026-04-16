@@ -176,8 +176,8 @@ static PyObject* pandamem_read_physical(PyObject* self, PyObject* args) {
     }
 
     // Limit single read size to prevent excessive allocation
-    if (size > 100 * 1024 * 1024) {
-        PyErr_SetString(PyExc_ValueError, "Read size too large (max 100MB)");
+    if (size > ram_size) {
+        PyErr_SetString(PyExc_ValueError, "Read size too large (max 2GB)");
         return NULL;
     }
 
@@ -225,8 +225,8 @@ PyMODINIT_FUNC PyInit_pandamem(void) {
 }
 
 /**
- * Run the volatility analysis, passing the desired profile and args
- * as python strings. Stores the results in the panda log or writes them
+ * Run the volatility analysis, passing the filter as a
+ * python string. Stores the results in the panda log or writes them
  * to stderr
  */
 int run_volatility_analysis(CPUState* env)
@@ -344,10 +344,10 @@ void before_block_exec(CPUState* env, TranslationBlock* tb)
         g_check_for_process = false;
     }
 
-    // if (!g_targeted) {
-    //     // printf("In not gtargeted\n");
-    //     return;
-    // }
+    if (!g_targeted) {
+        // printf("In not gtargeted\n");
+        return;
+    }
 
     // hwaddr tb_start_addr = tb->pc;
     // size_t tb_length = tb->size;

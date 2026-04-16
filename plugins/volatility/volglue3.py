@@ -26,11 +26,12 @@ from volatility3.framework.layers.physical import FileLayer
 
 import socket
 from typing import Optional
+from pathlib import Path
 
 import pandamem
 
 vollog = logging.getLogger(__name__)
-DEBUG = False
+DEBUG = True
 
 ctx = contexts.Context()
 
@@ -45,7 +46,7 @@ class PandaFile(object):
         self.length = length
         self.closed = False
         self.mode = "rb"
-        self.name = "panda://memory"
+        self.name = "/tmp/panda.panda"
         self.classname = type(self).__name__
         self.x86_32 = (length <= 0xffffffff)
     
@@ -62,6 +63,11 @@ class PandaFile(object):
         
         if DEBUG:
             print(self.classname+": Reading " + str(size)+" bytes from "+hex(self.pos))
+            
+            file_path = Path(f'/data/small_{hex(self.pos)}.dd')
+            if not file_path.exists():
+                with open(file_path, 'wb') as f:
+                    f.write(data)
         
         self.pos += size
         return data
@@ -278,9 +284,6 @@ def pslist_visitor(node, accumulator):
     if node.values:
         pid, ppid, img_name, offset = node.values[0:4]
         proc = ctx.object("symbol_table_name1!_EPROCESS", "layer_name", offset)
-        # if img_name == "services.exe":
-        #     print(offset)
-        #     breakpoint()
         pdata = {
             "pid": int(pid),
             "ppid": int(ppid),
@@ -345,8 +348,8 @@ def get_pslist(available_automagics):
         )
         
         print(f"[get_pslist] Config after construct:")
-        print(f"  - layer_name: {ctx.config.get('plugins.PsList.kernel.layer_name', 'NOT SET')}")
-        print(f"  - symbol_table: {ctx.config.get('plugins.PsList.kernel.symbol_table_name', 'NOT SET')}")
+        # breakpoint()
+        print(ctx.config)
         
         print("[get_pslist] Running plugin...")
         treegrid = constructed.run()
@@ -402,19 +405,65 @@ def get_psscan():
 
 def get_svcscan(available_automagics):
     """List all of the system services"""
-    config_path = "plugins.SvcScan"
-    automagics = automagic.choose_automagic(available_automagics, svcscan.SvcScan)
-    constructed = plugins.construct_plugin(ctx, automagics, svcscan.SvcScan, config_path, progress_callback=None, open_method=None)
-    treegrid = constructed.run()
-    svcscan_data = []
-    treegrid.visit(node=None, function=svcscan_visitor, initial_accumulator=svcscan_data)
-    driverscan_data = get_driverscan(available_automagics)
+    print("\n" + "="*60)
+    print("[get_svcscan] Starting")
+    print("="*60)
 
-    for svc in svcscan_data:
-        for drv in driverscan_data:
-            if svc["ServiceName"] == drv["servicekey"]:
-                svc["DriverName"] = drv["name"]
-    return svcscan_data
+    try:
+        config_path = "plugins.SvcScan"
+
+        print("[get_svcscan] Choosing automagic...")
+        automagics = automagic.choose_automagic(available_automagics, svcscan.SvcScan)
+        print(f"[get_svcscan] Chosen {len(automagics)} automagics")
+        print("[get_svcscan] Constructing plugin...")
+        constructed = plugins.construct_plugin(ctx, automagics, svcscan.SvcScan, config_path, progress_callback=None, open_method=None)
+        print(f"[get_svcscan] Config after construct:")
+        print(ctx.config)
+
+        print("[get_svcscan] Running plugin...")
+        treegrid = constructed.run()
+
+        print("[get_svcscan] Extracting data...")
+        svcscan_data = []
+        treegrid.visit(node=None, function=svcscan_visitor, initial_accumulator=svcscan_data)
+        print(f"[get_svcscan] SUCCESS: Found {len(svcscan_data)} services")
+        print("="*60 + "\n")
+
+        driverscan_data = get_driverscan(available_automagics)
+
+        for svc in svcscan_data:
+            for drv in driverscan_data:
+                if svc["ServiceName"] == drv["servicekey"]:
+                    svc["DriverName"] = drv["name"]
+        return svcscan_data
+    except Exception as e:
+        print(f"\n[get_svcscan] EXCEPTION CAUGHT: {type(e).__name__}")
+        print(f"[get_svcscan] Error message: {str(e)}")
+        
+        # Try to extract unsatisfied requirements
+        if hasattr(e, 'unsatisfied'):
+            print(f"[get_svcscan] Unsatisfied requirements:")
+            for req in e.unsatisfied:
+                # breakpoint()
+                print(f"  - {req}")
+        
+        # Also check what's in the context
+        print(f"[get_svcscan] Context config keys:")
+        for key in sorted(ctx.config.keys()):
+            print(f"  - {key}: {ctx.config[key]}")
+        
+        print(f"[get_svcscan] Context layers:")
+        for layer_name in ctx.layers.keys():
+            print(f"  - {layer_name}")
+        
+        print(f"[get_svcscan] Context symbol tables:")
+        for symbol in ctx.symbol_space.keys():
+            print(f"  - {symbol}")
+        
+        print("\n" + traceback.format_exc())
+        print("="*60 + "\n")
+        
+        return {"error": str(e), "traceback": traceback.format_exc()}
 
 
 def get_driverscan(available_automagics):
@@ -454,7 +503,7 @@ def run(location):
 
     # test_file_behavior()
 
-    location = "file:///tmp/panda.panda"
+    location = "file:/tmp/panda.panda"
     config_path = "automagic.LayerStacker.single_location"
     ctx.config[config_path] = location
     # breakpoint()
