@@ -1,10 +1,7 @@
 # This section sets up the volatility environment
 # and is invoked by the plugin when it loads this
 # script as a module
-#
-# It should be refactored so that the setup
-# is done as a function call to make it cleaner
-# and take the profile as an argument
+
 import os
 import json
 import logging
@@ -18,8 +15,8 @@ import urllib
 from urllib.request import BaseHandler
 
 import volatility3
-from volatility3.cli import text_renderer
-from volatility3.plugins.windows import pedump, psscan, pslist, svcscan, netscan, vadinfo
+from volatility3.cli import CommandLine, text_renderer
+from volatility3.plugins.windows import pedump, psscan, pslist, svcscan, netscan, vadinfo, vadwalk
 from volatility3.framework.interfaces.context import ModuleInterface, ModuleContainer
 from volatility3.framework import automagic, contexts, interfaces, plugins
 from volatility3.framework.layers.physical import FileLayer
@@ -28,10 +25,10 @@ import socket
 from typing import Optional
 from pathlib import Path
 
-import pandamem
+# import pandamem
 
 vollog = logging.getLogger(__name__)
-DEBUG = True
+DEBUG = False
 
 ctx = contexts.Context()
 
@@ -60,14 +57,17 @@ class PandaFile(object):
             addr = self.pos
         
         data = pandamem.read_physical(addr, size)
+        # print(len(data))
+        # breakpoint()
+        # mem_buf.extend(data)
         
         if DEBUG:
             print(self.classname+": Reading " + str(size)+" bytes from "+hex(self.pos))
             
-            file_path = Path(f'/data/small_{hex(self.pos)}.dd')
-            if not file_path.exists():
-                with open(file_path, 'wb') as f:
-                    f.write(data)
+            # file_path = Path(f'/data/small_{hex(self.pos)}.dd')
+            # if not file_path.exists():
+            #     with open(file_path, 'wb') as f:
+            #         f.write(data)
         
         self.pos += size
         return data
@@ -95,13 +95,14 @@ class PandaFile(object):
 
 class PandaFileHandler(BaseHandler):
     def default_open(self, req):
-        if 'panda://' in req.full_url or 'panda.panda' in req.full_url:
+        if 'panda.panda' in req.full_url:
             length = pandamem.get_ram_size()
             
             if length > 0xc0000000:
                 length += 0x40000000  # 3GB hole
             if DEBUG:
                 print(type(self).__name__ + ": initializing PandaFile with length="+hex(length))
+                # breakpoint()
             
             return PandaFile(length=length)
         
@@ -179,82 +180,154 @@ def hash_file(filepath, *algorithms):
 
 
 def get_process_hashes(available_automagics, filter_data):
-    config_path = "plugins.PEDump"
-    # dump = pedump.PEDump(ctx, config_path, file_name=args.location)
-    # breakpoint()
-    automagics = automagic.choose_automagic(available_automagics, pedump.PEDump, base=0)
-    # breakpoint()
-    constructed = plugins.construct_plugin(ctx, automagics, pedump.PEDump, config_path, progress_callback=None, open_method=None)
-    treegrid = constructed.run()
-    # breakpoint()
+    print("\n" + "="*60)
+    print("[get_process_hashes] Starting")
+    print("="*60)
 
     results = []
-    for proc in runner.calculate():
-        addr = proc.get_process_address_space()
+    try:
+        config_path = "plugins.PEDump"
+        ctx.config["plugins.PEDump.PEDump.base"] = 0x400000
+        ctx.config["plugins.PEDump.PEDump.pid"] = [x[0] for x in filter_data['thread_whitelist']]
+        # print(filter_data)
+        cmd = CommandLine()
+        cmd.output_dir = tempfile.mkdtemp()
+        FileHandler = cmd.file_handler_class_factory()
+        automagics = automagic.choose_automagic(available_automagics, pedump.PEDump)
+        constructed = plugins.construct_plugin(ctx, automagics, pedump.PEDump, config_path, progress_callback=None, open_method=FileHandler)
 
-        vtop_check = False
-        invalid = any(
-            [
-                addr is None,
-                proc.Peb is None,
-            ]
-        )
-        if proc.Peb:
-            vtop_check = addr.vtop(proc.Peb.ImageBaseAddress) is None
+        print(f"[get_process_hashes] Config after construct:")
+        # breakpoint()
+        # print(ctx.config)
+        
+        print("[get_process_hashes] Running plugin...")
+        treegrid = constructed.run()
+        proc_hash_data = []
+        treegrid.visit(node=None, function=lambda node, acc: process_hashes_visitor(node, acc, cmd), initial_accumulator=proc_hash_data)
+        
+        print(f"[get_process_hashes] SUCCESS: Found {len(proc_hash_data)} processes")
+        print("="*60 + "\n")
 
-        if invalid:
-            if vtop_check:
-                continue
+        return proc_hash_data
+    
+    except Exception as e:
+        print(f"\n[get_process_hashes] EXCEPTION CAUGHT: {type(e).__name__}")
+        print(f"[get_process_hashes] Error message: {str(e)}")
+        
+        # Try to extract unsatisfied requirements
+        if hasattr(e, 'unsatisfied'):
+            print(f"[get_process_hashes] Unsatisfied requirements:")
+            for req in e.unsatisfied:
+                # breakpoint()
+                print(f"  - {req}")
+        
+        # Also check what's in the context
+        print(f"[get_process_hashes] Context config keys:")
+        for key in sorted(ctx.config.keys()):
+            print(f"  - {key}: {ctx.config[key]}")
+        
+        print(f"[get_process_hashes] Context layers:")
+        for layer_name in ctx.layers.keys():
+            print(f"  - {layer_name}")
+        
+        print(f"[get_process_hashes] Context symbol tables:")
+        for symbol in ctx.symbol_space.keys():
+            print(f"  - {symbol}")
+        
+        print("\n" + traceback.format_exc())
+        print("="*60 + "\n")
 
-        if is_interesting(proc, filter_data):
-            name = str(proc.ImageFileName)
+        return {"error": str(e), "traceback": traceback.format_exc()}
 
-            runner.dump_pe(addr, proc.Peb.ImageBaseAddress, name)
+def process_hashes_visitor(node, accumulator, cmd):
+    if node.values:
+        result = {
+            "pid": int(node.values[0]),
+            "base": ctx.config["plugins.PEDump.PEDump.base"],
+        }
+        dumped_file = f"{cmd.output_dir}/{node.values[2]}"
+        result.update(hash_file(dumped_file, hashlib.sha256()))
+        accumulator.append(result)
+    return accumulator
 
-            dumped_file = os.path.join(config.DUMP_DIR, name)
+def vadinfo_visitor(node, accumulator):
+    if node.values:
+        startvpn, endvpn = node.values[3:5]
+        fileoutput = node.values[-1]
+        accumulator[(int(startvpn), int(endvpn))] = fileoutput
+        # breakpoint()
+    return accumulator
 
-            result = {
-                "pid": int(proc.UniqueProcessId),
-                "base": int(proc.Peb.ImageBaseAddress),
-            }
-            result.update(hash_file(dumped_file, hashlib.sha256()))
-            results.append(result)
-
-    return results
-
-
-def get_memory_hashes(filter_data):
-    # breakpoint()
-    runner = vadinfo.VADDump()
+def get_memory_hashes(available_automagics, filter_data):
+    print("\n" + "="*60)
+    print("[get_memory_hashes] Starting")
+    print("="*60)
 
     results = []
-    for proc in runner.calculate():
-        addr = proc.get_process_address_space()
+    try:
+        config_path = "plugins.VadInfo"
+        ctx.config["plugins.VadInfo.VadInfo.pid"] = [x[0] for x in filter_data['thread_whitelist']]
+        ctx.config["plugins.VadInfo.VadInfo.dump"] = True
+        # print(filter_data)
+        cmd = CommandLine()
+        cmd.output_dir = tempfile.mkdtemp()
+        FileHandler = cmd.file_handler_class_factory()
+        automagics = automagic.choose_automagic(available_automagics, vadinfo.VadInfo)
+        constructed = plugins.construct_plugin(ctx, automagics, vadinfo.VadInfo, config_path, progress_callback=None, open_method=FileHandler)
 
-        if not addr:
-            continue
+        print(f"[get_memory_hashes] Config after construct:")
+        # print(ctx.config)
+        print("[get_memory_hashes] Running vadinfo plugin...")
+        vadinfo_data = {}
+        treegrid = constructed.run()
+        treegrid.visit(node=None, function=lambda node, acc: vadinfo_visitor(node, acc), initial_accumulator=vadinfo_data)
 
-        if is_interesting(proc, filter_data):
+        config_path = "plugins.VadWalk"
+        ctx.config["plugins.VadWalk.VadWalk.pid"] = [x[0] for x in filter_data['thread_whitelist']]
+        mem_hash_data = []
+        automagics = automagic.choose_automagic(available_automagics, vadwalk.VadWalk)
+        constructed = plugins.construct_plugin(ctx, automagics, vadwalk.VadWalk, config_path, progress_callback=None, open_method=None)
 
-            for vad, _ in proc.get_vads(
-                vad_filter=lambda v: v.Length < pow(2, 30), skip_max_commit=True
-            ):
-                path = os.path.join(
-                    config.DUMP_DIR,
-                    "{}_{}.{}".format(vad.Start, vad.End, proc.UniqueProcessId),
-                )
+        print(f"[get_memory_hashes] Config after vadwalk construct:")
+        # breakpoint()
+        # print(ctx.config)
+        
+        print("[get_memory_hashes] Running vadwalk plugin...")
+        treegrid = constructed.run()
+        treegrid.visit(node=None, function=lambda node, acc: memory_hashes_visitor(node, acc, cmd, vadinfo_data), initial_accumulator=mem_hash_data)
+        
+        print(f"[get_memory_hashes] SUCCESS: Found {len(mem_hash_data)} processes")
+        print("="*60 + "\n")
 
-                runner.dump_vad(path, vad, addr)
+        return mem_hash_data
+    
+    except Exception as e:
+        print(f"\n[get_memory_hashes] EXCEPTION CAUGHT: {type(e).__name__}")
+        print(f"[get_memory_hashes] Error message: {str(e)}")
+        
+        
+        print("\n" + traceback.format_exc())
+        print("="*60 + "\n")
 
-                result = {
-                    "pid": int(proc.UniqueProcessId),
-                    "start": int(vad.Start),
-                    "end": int(vad.End),
-                }
-                result.update(hash_file(path, hashlib.sha256()))
-                results.append(result)
+        return {"error": str(e), "traceback": traceback.format_exc()}
 
-    return results
+
+def memory_hashes_visitor(node, accumulator, cmd, vadinfo_data):
+    if node.values:
+        # print(vadinfo_data)
+        start = int(node.values[-3])
+        end = int(node.values[-2])
+        result = {
+            "pid": int(node.values[0]),
+            "start": start,
+            "end": end
+        }
+        # breakpoint()
+        dumped_file = f"{cmd.output_dir}/{vadinfo_data[(start, end)]}"
+        result.update(hash_file(dumped_file, hashlib.sha256()))
+        accumulator.append(result)
+    return accumulator
+
 
 def socket_visitor(node, accumulator):
     if node.values:
@@ -280,10 +353,21 @@ def socket_visitor(node, accumulator):
         accumulator.append(sdata)
     return accumulator
 
-def pslist_visitor(node, accumulator):
+def pslist_visitor(node, accumulator, filter_data):
     if node.values:
         pid, ppid, img_name, offset = node.values[0:4]
         proc = ctx.object("symbol_table_name1!_EPROCESS", "layer_name", offset)
+        if is_interesting(proc, filter_data):
+            # breakpoint()
+            result = {
+                "pid": int(pid),
+                "base": int(proc.get_peb().ImageBaseAddress)
+            }
+            # result.update(hash_file(, hashlib.sha256()))
+        #     accumulator[1].append(result)
+        # for dumps in os.listdir(cmd.output_dir):
+
+        # breakpoint()
         pdata = {
             "pid": int(pid),
             "ppid": int(ppid),
@@ -329,7 +413,7 @@ def driverscan_visitor(node, accumulator):
     return accumulator
 
 
-def get_pslist(available_automagics):
+def get_pslist(available_automagics, filter_data):
     """List all the tasks that aren't hidden, unlinked, etc"""
     print("\n" + "="*60)
     print("[get_pslist] Starting")
@@ -339,6 +423,11 @@ def get_pslist(available_automagics):
         config_path = "plugins.PsList"
         
         print("[get_pslist] Choosing automagic...")
+        # ctx.config[f"{config_path}.PsList.pid"] = [x[0] for x in filter_data['thread_whitelist']]
+        # cmd = CommandLine()
+        # cmd.output_dir = tempfile.mkdtemp()
+        # FileHandler = cmd.file_handler_class_factory()
+
         automagics = automagic.choose_automagic(available_automagics, pslist.PsList)
         print(f"[get_pslist] Chosen {len(automagics)} automagics")
         print("[get_pslist] Constructing plugin...")
@@ -349,15 +438,15 @@ def get_pslist(available_automagics):
         
         print(f"[get_pslist] Config after construct:")
         # breakpoint()
-        print(ctx.config)
+        # print(ctx.config)
         
         print("[get_pslist] Running plugin...")
         treegrid = constructed.run()
         
         print("[get_pslist] Extracting data...")
         pslist_data = []
-        treegrid.visit(node=None, function=pslist_visitor, initial_accumulator=pslist_data)
-        
+        treegrid.visit(node=None, function=lambda node, acc: pslist_visitor(node, acc, filter_data), initial_accumulator=pslist_data)
+        # breakpoint()
         print(f"[get_pslist] SUCCESS: Found {len(pslist_data)} processes")
         print("="*60 + "\n")
         
@@ -411,6 +500,7 @@ def get_svcscan(available_automagics):
 
     try:
         config_path = "plugins.SvcScan"
+        print(f"[Location] {ctx.config['automagic.LayerStacker.single_location']}")
 
         print("[get_svcscan] Choosing automagic...")
         automagics = automagic.choose_automagic(available_automagics, svcscan.SvcScan)
@@ -418,7 +508,7 @@ def get_svcscan(available_automagics):
         print("[get_svcscan] Constructing plugin...")
         constructed = plugins.construct_plugin(ctx, automagics, svcscan.SvcScan, config_path, progress_callback=None, open_method=None)
         print(f"[get_svcscan] Config after construct:")
-        print(ctx.config)
+        # print(ctx.config)
 
         print("[get_svcscan] Running plugin...")
         treegrid = constructed.run()
@@ -490,7 +580,7 @@ def get_sockets(available_automagics):
     return socket_data
 
 
-def run(location):
+def run(location, filterfile):
     """Returns a list of the processes as a JSON string
 
     This analysis demonstrates that volatility can be successfully
@@ -502,25 +592,26 @@ def run(location):
     setup_panda_handler()
 
     # test_file_behavior()
-
-    location = "file:/tmp/panda.panda"
+    # memory_file = "mem.ram"
+    # location = f"file:{memory_file}"
     config_path = "automagic.LayerStacker.single_location"
     ctx.config[config_path] = location
+    ctx.config["config.output_dir"] = "here"
     # breakpoint()
     # Build automagics
     print("Running automagic to build layers...")
     available_automagics = automagic.available(ctx)
 
     try:
-        # with open(filterfile, "rb") as fobj:
-        #     filter_data = json.load(fobj)
+        with open(filterfile, "rb") as fobj:
+            filter_data = json.load(fobj)
 
         analysis_results = {
-            "pslist": get_pslist(available_automagics),
+            "pslist": get_pslist(available_automagics, filter_data),
             "svcscan": get_svcscan(available_automagics),
             "sockets": get_sockets(available_automagics),
-            # "process_hashes": get_process_hashes(available_automagics, filter_data),
-            # "memory_hashes": get_memory_hashes(filter_data),
+            "process_hashes": get_process_hashes(available_automagics, filter_data),
+            "memory_hashes": get_memory_hashes(available_automagics, filter_data),
         }
     except Exception as e:
         print(f"ERROR: {e}")
@@ -539,8 +630,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Test analysis")
     parser.add_argument("--location", default="file:mymem.dd")
+    parser.add_argument("--filter", default="aprog-x64-tracefilter.json")
     args = parser.parse_args()
-    print(run(args.location))
+    print(run(args.location, args.filter))
 
 
 ### Must end with this comment
