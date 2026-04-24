@@ -35,7 +35,7 @@ char g_profile[512] = {0};
 // Constants
 #define TARGET_PAGE_SIZE 1024
 char g_filter_path[512] = {0};
-const char g_script_name[] = "/volglue3.py";
+const char g_script_name[] = "/volglue.py";
 
 // Globals
 std::shared_ptr<IntroPANDAManager> os_manager;
@@ -417,7 +417,7 @@ bool init_plugin(void* self)
     Py_InitializeFromConfig(&config);
 
     // Load the program as a code object
-    pcode = Py_CompileString(script_contents, "volglue3.py", Py_file_input);
+    pcode = Py_CompileString(script_contents, "volglue.py", Py_file_input);
     CHECK_OR_DIE(pcode, "Failed to compile python program!\n", cleanup);
 
     // Load the code object into a module
