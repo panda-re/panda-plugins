@@ -22,7 +22,6 @@ extern "C" {
 #include "osi/windows/wintrospection.h"
 
 #include "filter.h"
-#include "memory-server.h"
 
 // Globals to be set by configs, eventually
 char g_program_name[] = "volatility_plugin";
@@ -31,13 +30,10 @@ char g_func_name[] = "run";
 
 char g_script_path[4096] = {0};
 
-// Globals to be calculated by the plugin, eventually
 char g_profile[512] = {0};
 
 // Constants
-#define SOCKET_PATH_FMT "/tmp/panda%d.sock"
 #define TARGET_PAGE_SIZE 1024
-char g_location[512] = "file:\0";
 char g_filter_path[512] = {0};
 const char g_script_name[] = "/volglue3.py";
 
@@ -73,78 +69,6 @@ void uninit_plugin(void*);
 int run_volatility_analysis(CPUState* env);
 bool log_analysis_results(CPUState* env, const char* data);
 
-static const uint8_t _zero_block[1024] = {0};
-static void actually_dump_physical_memory(FILE* out, size_t len)
-{
-    hwaddr addr = 0;
-    uint8_t block[sizeof(_zero_block)];
-
-    if (!out)
-        return;
-
-    while (len != 0)
-    {
-        size_t l = sizeof(block);
-        if (l > len)
-            l = len;
-        if (panda_physical_memory_read(addr, block, l) == MEMTX_OK)
-            fwrite(block, 1, l, out);
-        else
-            fwrite(_zero_block, 1, l, out);
-        addr += l;
-        len -= l;
-    }
-}
-
-static void dump_memory(char* filename, char* register_filename, uint64_t pmem_len){
-    FILE* out = fopen(filename, "wb");
-
-    if (pmem_len == 0){
-        // dump all memory if not specified as arg
-        pmem_len = ram_size;
-    }
-
-    actually_dump_physical_memory(out, pmem_len);
-    fclose(out);
-    if (register_filename)
-    {
-        if ((out = fopen(register_filename, "w")) != NULL)
-        {
-            CPUState* cpu;
-            CPU_FOREACH(cpu)
-            {
-                fprintf(out, "CPU#%d\n", cpu->cpu_index);
-                cpu_dump_state(cpu, out, fprintf, CPU_DUMP_FPU);
-            }
-            fclose(out);
-        }
-    }
-
-    panda_replay_end();
-}
-
-static void dump_memory_tb(char* filename, hwaddr start_addr, size_t len) {
-    FILE* out = fopen(filename, "wb");
-    if (!out) {
-        fprintf(stderr, "Failed to open file for memory dump: %s\n", filename);
-        return;
-    }
-
-    uint8_t block[1024]; // Adjust block size as needed
-    while (len != 0) {
-        size_t l = sizeof(block);
-        if (l > len)
-            l = len;
-        if (panda_physical_memory_read(start_addr, block, l) == MEMTX_OK)
-            fwrite(block, 1, l, out);
-        else
-            fwrite(_zero_block, 1, l, out);
-        start_addr += l;
-        len -= l;
-    }
-
-    fclose(out);
-}
 
 void panda_memsavep(char* filename) {
     FILE* f = fopen(filename, "wb");
@@ -188,7 +112,7 @@ static PyObject* pandamem_read_physical(PyObject* self, PyObject* args) {
 
     int res = panda_physical_memory_rw(addr, buffer, size, 0);
 
-    if (res == 0) {
+    if (res == MEMTX_OK) {
         PyObject* bytes = PyBytes_FromStringAndSize((char*) buffer, size);
         free(buffer);
         return bytes;
@@ -231,8 +155,10 @@ PyMODINIT_FUNC PyInit_pandamem(void) {
  */
 int run_volatility_analysis(CPUState* env)
 {
+    // Dump RAM at this moment
+    panda_memsavep("mem.ram");
+
     // Convert global strings to python strings
-    // PyObject* plocation_str = PyUnicode_FromString(g_location);
     PyObject* pfilter_str = PyUnicode_FromString(g_filter_path);
 
     PyObject* pargs = PyTuple_New(1);
@@ -247,7 +173,7 @@ int run_volatility_analysis(CPUState* env)
     // Add these strings to an argument object
     PyTuple_SetItem(pargs, 0, pfilter_str);
 
-    // Call run(location)
+    // Call run(filter)
     PyObject* pvalue = PyObject_CallObject(g_pfunc, pargs);
     if (pvalue) {
         // The function returned a value successfully
@@ -345,13 +271,9 @@ void before_block_exec(CPUState* env, TranslationBlock* tb)
     }
 
     if (!g_targeted) {
-        // printf("In not gtargeted\n");
         return;
     }
 
-    // hwaddr tb_start_addr = tb->pc;
-    // size_t tb_length = tb->size;
-    // fprintf(stdout, "PC: %lu, Size: %d\n", tb_start_addr, tb_length);
 
     auto pid = process_get_pid(g_current_process);
     auto asid = process_get_asid(g_current_process);
@@ -362,6 +284,7 @@ void before_block_exec(CPUState* env, TranslationBlock* tb)
     }
     
     run_volatility_analysis(env);
+    unlink("mem.ram");
 
     // remove the thread now that we've handled it and make
     // the next bb refresh state info
@@ -446,6 +369,7 @@ bool init_plugin(void* self)
     panda_arg_list* filter_args = panda_get_args("filter");
     filter_path = panda_parse_string(filter_args, "file", "");
     strncpy(g_filter_path, filter_path, sizeof(g_filter_path) - 1);
+    fprintf(stdout, "[Filter file]: %s\n", g_filter_path);
     g_filter.reset(new InstrumentationFilter(g_filter_path));
     panda_free_args(filter_args);
 
@@ -456,23 +380,13 @@ bool init_plugin(void* self)
 
     // Read arguments
     const char* profile_arg = panda_os_name;
-    // const char* profile = nullptr; // volatility profile
     if (!profile_arg) {
         fprintf(stderr, "[%s] The -os <profile> flag is required\n", __FILE__);
         return false;
     }
 
-    char* socket_path = (char*)calloc(512, 1);
-    if (!socket_path) {
-        fprintf(stderr, "[%s] Failed to allocate memory for socket path\n", __FILE__);
-        return false;
-    }
-    // sprintf(socket_path, SOCKET_PATH_FMT, getpid());
-    strncat(g_location, "mem.ram", sizeof(g_location) - 1);
-
     const char* python_script = panda_parse_string(vol_args, "script", g_script_path);
 
-    // strncpy(g_profile, profile, sizeof(g_profile) - 1);
     panda_free_args(vol_args);
 
     panda_cb pcb;
@@ -507,7 +421,6 @@ bool init_plugin(void* self)
     CHECK_OR_DIE(pcode, "Failed to compile python program!\n", cleanup);
 
     // Load the code object into a module
-    // fprintf(stdout, "Module name: %s\n", g_module_name);
     pmodule = PyImport_ExecCodeModule("gluemod", pcode);
     CHECK_OR_DIE(pmodule, "Failed to load as module!\n", cleanup);
 
@@ -521,11 +434,6 @@ bool init_plugin(void* self)
     }
 
     fprintf(stdout, "Successfully initialized python routines.\n");
-
-    // if (!start_memory_server(socket_path)) {
-    //     fprintf(stderr, "[%s] Failed to start memory server!\n", __FILE__);
-    //     goto cleanup;
-    // }
 
     if (script_contents) {
         free(script_contents);
@@ -558,21 +466,16 @@ cleanup:
     Py_XDECREF(g_pfunc);
     g_pfunc = NULL;
     PyConfig_Clear(&config);
+    unlink("mem.ram");
     return false;
 }
 
 void uninit_plugin(void* self)
 {
-    // stop_memory_server();
-    // fprintf(stdout, "\n[VOLATILITY] Running analysis at end of replay...\n");
-    
-    // CPUState* env = first_cpu;
-    // if (env) {
-    //     run_volatility_analysis(env);
-    // }
     Py_XDECREF(g_pfunc);
     g_pfunc = NULL;
     PyConfig_Clear(&config);
     Py_Finalize();
     teardown_avro();
+    unlink("mem.ram");
 }

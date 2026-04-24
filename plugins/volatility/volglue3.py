@@ -20,6 +20,7 @@ from volatility3.plugins.windows import pedump, psscan, pslist, svcscan, netscan
 from volatility3.framework.interfaces.context import ModuleInterface, ModuleContainer
 from volatility3.framework import automagic, contexts, interfaces, plugins
 from volatility3.framework.layers.physical import FileLayer
+from volatility3.framework.layers.linear import LinearlyMappedLayer
 
 import socket
 from typing import Optional
@@ -449,7 +450,7 @@ def get_pslist(available_automagics, filter_data):
         # breakpoint()
         print(f"[get_pslist] SUCCESS: Found {len(pslist_data)} processes")
         print("="*60 + "\n")
-        
+        LinearlyMappedLayer.read.cache_clear()
         return pslist_data
         
     except Exception as e:
@@ -481,16 +482,6 @@ def get_pslist(available_automagics, filter_data):
         
         return {"error": str(e), "traceback": traceback.format_exc()}
 
-def get_psscan():
-    """List all the tasks including hidden, unlinked, etc"""
-    config_path = "plugins.PsScan"
-    automagics = automagic.choose_automagic(available_automagics, psscan.PsScan)
-    constructed = plugins.construct_plugin(ctx, automagics, psscan.PsScan, config_path, progress_callback=None, open_method=None)
-    treegrid = constructed.run()
-    psscan_data = []
-    treegrid.visit(node=None, function=pslist_visitor, initial_accumulator=psscan_data)
-    return psscan_data
-    # text_renderer.PrettyTextRenderer().render(treegrid)
 
 def get_svcscan(available_automagics):
     """List all of the system services"""
@@ -525,6 +516,7 @@ def get_svcscan(available_automagics):
             for drv in driverscan_data:
                 if svc["ServiceName"] == drv["servicekey"]:
                     svc["DriverName"] = drv["name"]
+        LinearlyMappedLayer.read.cache_clear()
         return svcscan_data
     except Exception as e:
         print(f"\n[get_svcscan] EXCEPTION CAUGHT: {type(e).__name__}")
@@ -552,7 +544,7 @@ def get_svcscan(available_automagics):
         
         print("\n" + traceback.format_exc())
         print("="*60 + "\n")
-        
+        LinearlyMappedLayer.read.cache_clear()
         return {"error": str(e), "traceback": traceback.format_exc()}
 
 
@@ -580,7 +572,7 @@ def get_sockets(available_automagics):
     return socket_data
 
 
-def run(location, filterfile):
+def run(filterfile):
     """Returns a list of the processes as a JSON string
 
     This analysis demonstrates that volatility can be successfully
@@ -589,15 +581,14 @@ def run(location, filterfile):
 
     """
     # print("Volatility version: %r" % volatility3.framework.constants.VERSION)
-    setup_panda_handler()
+    # setup_panda_handler()
 
     # test_file_behavior()
-    # memory_file = "mem.ram"
-    # location = f"file:{memory_file}"
+    memory_file = "mem.ram"
+    location = f"file:{memory_file}"
     config_path = "automagic.LayerStacker.single_location"
     ctx.config[config_path] = location
-    ctx.config["config.output_dir"] = "here"
-    # breakpoint()
+
     # Build automagics
     print("Running automagic to build layers...")
     available_automagics = automagic.available(ctx)
@@ -632,7 +623,7 @@ if __name__ == "__main__":
     parser.add_argument("--location", default="file:mymem.dd")
     parser.add_argument("--filter", default="aprog-x64-tracefilter.json")
     args = parser.parse_args()
-    print(run(args.location, args.filter))
+    print(run(args.filter))
 
 
 ### Must end with this comment
