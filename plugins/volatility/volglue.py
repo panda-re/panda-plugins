@@ -180,6 +180,7 @@ def get_process_hashes(available_automagics, filter_data):
     treegrid = constructed.run()
     proc_hash_data = []
     treegrid.visit(node=None, function=lambda node, acc: process_hashes_visitor(node, acc, cmd), initial_accumulator=proc_hash_data)
+    shutil.rmtree(cmd.output_dir)
 
     return proc_hash_data
 
@@ -219,6 +220,7 @@ def get_memory_hashes(available_automagics, filter_data):
 
     treegrid = constructed.run()
     treegrid.visit(node=None, function=lambda node, acc: memory_hashes_visitor(node, acc, cmd, vadinfo_data), initial_accumulator=mem_hash_data)
+    shutil.rmtree(cmd.output_dir)
 
     return mem_hash_data
 
