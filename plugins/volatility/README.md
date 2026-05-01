@@ -30,10 +30,10 @@ This plugin takes in a PANDA recording and outputs an avro record file,`volatili
 ## Usage
 
 ### Running manually
-`volatility` plugin takes two arguments, `-os`, which asks for the type of operating system that the recording is used, and `--panda-arg filter=FILE.txt` to pass in the filter file to plugin. An example invocation:
+`volatility` plugin takes two arguments, `-os`, which asks for the type of operating system that the recording is used, and `--panda-arg filter:file=filter.json` to pass in the filter file to plugin. An example invocation:
 
 ```bash
-panda-system-i386 -m 2048 -replay /path/to/RECORDING -panda 'volatility' -os windows-32-7sp1 --panda-arg filter:file=filter.txt
+panda-system-i386 -m 2048 -replay /path/to/RECORDING -panda 'volatility' -os windows-32-7sp1 --panda-arg filter:file=filter.json
 ```
 
 * To view the result avro record, we can use `jq` (a command line JSON processor for better visualization)
