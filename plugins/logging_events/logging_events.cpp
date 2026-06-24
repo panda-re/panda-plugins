@@ -116,6 +116,17 @@ void syslog_syscall_hook(CPUState* env, target_ulong pc, int type, target_ulong 
     }
 }
 
+
+int nt_trace_event_hook(CPUState* env, target_ulong pc, target_ulong handle, target_ulong flags, void* buffer, target_ulong size) {
+    if (buffer) {
+        uint8_t read_buf[20];
+        panda_virtual_memory_read(env, buffer, read_buf, size);
+        printf("[NtTraceEvent] %s\n", (char*) read_buf);
+        return 1;
+    }
+    return 0;
+}
+
 static const uint8_t _zero_block[1024] = {0};
 static void actually_dump_physical_memory(FILE* out, size_t len)
 {
@@ -437,6 +448,7 @@ void register_panda_callbacks(void* self) {
     // register_callstack_callback("on_call", call_insn_callback);
 
     PPP_REG_CB("syscalls2", on_sys_syslog_enter, syslog_syscall_hook);
+    PPP_REG_CB("syscalls2", on_NtTraceEvent_enter, )
 }
 
 
@@ -449,11 +461,11 @@ bool init_plugin(void* self)
 
     panda_enable_precise_pc();
 
-    assert(init_dynamic_symbols_api());
+    // assert(init_dynamic_symbols_api());
     // assert(init_osi_linux_api());
 
-    assert(init_hooks_api());
-    __enable_hooking();
+    // assert(init_hooks_api());
+    // __enable_hooking();
 
     // assert(init_hooks2_api());
     // __enable_hooks2(id);
