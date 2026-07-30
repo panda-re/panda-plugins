@@ -448,8 +448,6 @@ bool init_plugin(void* self)
         goto cleanup;
     }
 
-    // temporary -- forcing to be windows specific so i don't have to edit any more code
-    // in this plugin
     g_os_manager = std::dynamic_pointer_cast<Windows7IntrospectionManager>(os_manager);
 
     return true;
