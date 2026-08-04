@@ -34,9 +34,13 @@ extern "C" {
 // // Data Struct Imports
 #include "typesignature/tuple_hash.h"
 #include <algorithm>
+#include <cctype>
+#include <cstring>
 #include <functional>
 #include <exception>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 // // BBStats like Process
 #include "apicall_tracer/process/block.h"
@@ -222,15 +226,90 @@ void syslog_syscall_hook(CPUState* env, target_ulong pc, int type, target_ulong 
 }
 
 
-void nt_trace_event_hook(CPUState* env, target_ulong pc, target_ulong handle, unsigned int flags, unsigned int size, target_ulong fields) {
-    uint8_t read_buf[size];
-    panda_virtual_memory_read(env, fields, read_buf, size);
-    printf("[NtTraceEvent] Flags: %u, Buffer (hex): ", flags);
-    for (size_t i = 0; i < size; i++) {
-        printf("%02x ", read_buf[i]);
+// EVENT_TRACE_HEADER (48 bytes on x64): the fixed-size header NtTraceEvent's
+// Fields buffer always begins with. The actual message text follows immediately
+// after it, encoded as ASCII and/or UTF-16 depending on the provider.
+#pragma pack(push, 1)
+struct EventTraceHeaderMin {
+    uint16_t size;
+    uint16_t field_type_flags;
+    uint32_t version;
+    uint32_t thread_id;
+    uint32_t process_id;
+    int64_t timestamp;
+    uint8_t guid[16];
+    uint64_t union_field;  // ClientContext/Flags, KernelTime/UserTime, or ProcessorTime
+};
+#pragma pack(pop)
+
+static void print_ascii_runs(const uint8_t* buf, size_t len, const char* label) {
+    size_t i = 0;
+    while (i < len) {
+        if (!isprint(buf[i])) {
+            i++;
+            continue;
+        }
+        size_t start = i;
+        while (i < len && isprint(buf[i])) {
+            i++;
+        }
+        size_t run_len = i - start;
+        if (run_len >= 3) {
+            printf("  [%s] %.*s\n", label, (int)run_len, (const char*)(buf + start));
+        }
     }
-    printf("\n");
-    printf("[Fields] %i\n", fields);
+}
+
+static void print_utf16_runs(const uint8_t* buf, size_t len, const char* label) {
+    std::string current;
+    for (size_t i = 0; i + 1 < len; i += 2) {
+        uint16_t wc = (uint16_t)(buf[i] | (buf[i + 1] << 8));
+        if (wc != 0 && wc < 0x7f && isprint((int)wc)) {
+            current.push_back((char)wc);
+            continue;
+        }
+        if (current.size() >= 3) {
+            printf("  [%s-utf16] %s\n", label, current.c_str());
+        }
+        current.clear();
+    }
+    if (current.size() >= 3) {
+        printf("  [%s-utf16] %s\n", label, current.c_str());
+    }
+}
+
+void nt_trace_event_hook(CPUState* env, target_ulong pc, target_ulong handle, unsigned int flags, unsigned int size, target_ulong fields) {
+    if (!fields || size == 0) {
+        return;
+    }
+
+    // guard against bogus/oversized lengths before allocating
+    const unsigned int max_size = 64 * 1024;
+    unsigned int read_size = std::min(size, max_size);
+
+    std::vector<uint8_t> buf(read_size);
+    if (panda_virtual_memory_read(env, fields, buf.data(), read_size) != 0) {
+        printf("[NtTraceEvent] Flags: %u, size: %u, <unreadable>\n", flags, size);
+        return;
+    }
+
+    printf("[NtTraceEvent] Flags: %u, size: %u\n", flags, size);
+
+    const uint8_t* payload = buf.data();
+    size_t payload_len = buf.size();
+
+    if (buf.size() >= sizeof(EventTraceHeaderMin)) {
+        EventTraceHeaderMin header;
+        memcpy(&header, buf.data(), sizeof(header));
+        printf("  [Header] pid=%u tid=%u version=%u\n", header.process_id,
+               header.thread_id, header.version);
+
+        payload += sizeof(header);
+        payload_len -= sizeof(header);
+    }
+
+    print_ascii_runs(payload, payload_len, "ascii");
+    print_utf16_runs(payload, payload_len, "wide");
 }
 
 void nt_write_file_hook(CPUState* env, target_ulong pc, target_ulong handle, target_ulong event, target_ulong ApcRoutine, target_ulong ApcContext,
@@ -438,28 +517,191 @@ static void dump_memory(char* filename, char* register_filename, uint64_t pmem_l
 //     }
 // }
 
-void report_event_hook(CPUState* env, TranslationBlock* tb, struct hook* h) {
-    fprintf(stdout, "[REPORT EVENT HOOK]\n");
+// x64 calling convention: args 1-4 in RCX/RDX/R8/R9, args 5+ spill to the
+// stack past the 0x20 shadow space.
+// BOOL ReportEventA(HANDLE hEventLog, WORD wType, WORD wCategory,
+//     DWORD dwEventID, PSID lpUserSid, WORD wNumStrings,
+//     DWORD dwDataSize, LPCSTR *lpStrings, LPVOID lpRawData)
+static void read_report_event_strings(CPUState* env) {
+    CPUX86State* regs = (CPUX86State*) env;
+    target_ulong rsp = regs->regs[R_ESP];
+    target_ulong num_strings_addr = rsp + 0x30;  // arg6: wNumStrings
+    target_ulong lp_strings_addr = rsp + 0x40;   // arg8: lpStrings
+
+    uint16_t num_strings = 0;
+    panda_virtual_memory_read(env, num_strings_addr, (uint8_t*)&num_strings, sizeof(num_strings));
+
+    target_ulong lp_strings = 0;
+    panda_virtual_memory_read(env, lp_strings_addr, (uint8_t*)&lp_strings, sizeof(lp_strings));
+
+    printf("[ReportEventA] %u string(s) at 0x%lx\n", num_strings, (uint64_t)lp_strings);
+
+    for (uint16_t i = 0; i < num_strings && lp_strings; i++) {
+        target_ulong str_ptr = 0;
+        target_ulong entry_addr = lp_strings + i * sizeof(target_ulong);
+        if (panda_virtual_memory_read(env, entry_addr, (uint8_t*)&str_ptr,
+                                       sizeof(str_ptr)) != 0 || !str_ptr) {
+            printf("  [%u] <unreadable pointer>\n", i);
+            continue;
+        }
+
+        uint8_t buf[256] = {0};
+        if (panda_virtual_memory_read(env, str_ptr, buf, sizeof(buf) - 1) == 0) {
+            printf("  [%u] %s\n", i, (char*)buf);
+        } else {
+            printf("  [%u] <unreadable string>\n", i);
+        }
+    }
 }
 
-bool register_hook(CPUState* env) {
-    // if (hook_registered) {
-    //     return;
-    // }
-    // struct symbol_hook sh = {0};
-    // strncpy(sh.name, "CreateFileW", 256);
-    // sh.cb.start_block_exec = report_event_hook;
-    // sh.type = PANDA_CB_START_BLOCK_EXEC;
-    // sh.hook_offset = false;
-    // strncpy(sh.section, "advapi32.dll", 256);
-    // __add_symbol_hook(&sh);
+void report_event_hook(CPUState* env, TranslationBlock* tb, struct hook* h) {
+    fprintf(stdout, "[REPORT EVENT HOOK]\n");
+    read_report_event_strings(env);
+}
+
+// A PE export's "RVA" can point at real code, or -- if the export is a
+// forwarder (common for advapi32.dll APIs that Windows moved into
+// sechost.dll/kernelbase.dll but kept a compat export for) -- at a
+// null-terminated ASCII string of the form "ModuleName.FunctionName"
+// instead. Hooking a forwarder's advertised address directly is a no-op:
+// callers never actually execute there, since import resolution follows
+// the forwarder at load time and jumps straight to the real target. This
+// reads that address and, if it looks like a forwarder string rather than
+// code, splits it into the module/function it points to.
+static bool try_read_forwarder(CPUState* env, target_ulong addr,
+                                std::string* out_module, std::string* out_func) {
+    char buf[128] = {0};
+    if (panda_virtual_memory_read(env, addr, (uint8_t*)buf, sizeof(buf) - 1) != 0) {
+        return false;
+    }
+
+    size_t dot = std::string::npos;
+    size_t len = 0;
+    for (; len < sizeof(buf) - 1 && buf[len]; len++) {
+        if (!isprint((unsigned char)buf[len])) {
+            return false;
+        }
+        if (buf[len] == '.' && dot == std::string::npos) {
+            dot = len;
+        }
+    }
+    if (len == 0 || dot == std::string::npos || dot == 0 || dot == len - 1) {
+        return false;
+    }
+
+    *out_module = std::string(buf, dot);
+    *out_func = std::string(buf + dot + 1, len - dot - 1);
+    return true;
+}
+
+// Windows-native replacement for dynamic_symbols' resolve_symbol, which only
+// understands Linux ELF .so exports and always returns a zeroed symbol here.
+// Walks the current process's module list (same libosi path update_symbols
+// uses) and looks up func_name's RVA in the PE export table of the first
+// module whose path contains module_substr. Follows forwarder exports (see
+// try_read_forwarder) into whichever module they actually point at.
+static bool find_export_address(CPUState* env, const char* module_substr,
+                                 const char* func_name, target_ulong* out_addr,
+                                 int depth = 0) {
+    if (depth > 4) {
+        // Forwarder chains this long mean something is misparsed -- bail
+        // rather than loop.
+        return false;
+    }
+
+    auto process = kosi_get_current_process(g_kernel_osi);
+    auto module_list = get_module_list(g_kernel_osi, process_get_eprocess(process),
+                                       process_is_wow64(process));
+    free_process(process);
+
+    if (module_list == nullptr) {
+        return false;
+    }
+
+    bool found = false;
+    std::string fwd_module, fwd_func;
+    bool is_forward = false;
+    auto curr = module_list_next(module_list);
+    while (curr != nullptr) {
+        std::string path = std::string(module_entry_get_dllpath(curr));
+        std::transform(path.begin(), path.end(), path.begin(), ::tolower);
+
+        if (!found && path.find(module_substr) != std::string::npos) {
+            uint64_t base = module_entry_get_base_address(curr);
+            auto in_memory_pe = init_mem_pe(module_list_get_osi(module_list), base, false);
+
+            if (in_memory_pe && parse_exports(in_memory_pe)) {
+                size_t len = MAX_FUNCTION_PROTOTYPE_SIZE;
+                char fn_name[MAX_FUNCTION_PROTOTYPE_SIZE];
+                auto total = mem_pe_export_table_get_numberoffunctions(in_memory_pe);
+
+                for (uint32_t i = 0; i < total; i++) {
+                    memset(fn_name, '\0', len);
+                    if (mem_pe_export_table_get_name_by_table_idx(in_memory_pe, fn_name, &len, i) &&
+                        strcmp(fn_name, func_name) == 0) {
+                        auto rva = mem_pe_export_table_get_rva_by_table_idx(in_memory_pe, i);
+                        target_ulong candidate = base + rva;
+
+                        if (try_read_forwarder(env, candidate, &fwd_module, &fwd_func)) {
+                            is_forward = true;
+                        } else {
+                            *out_addr = candidate;
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            free_mem_pe(in_memory_pe);
+        }
+
+        free_module_entry(curr);
+        curr = module_list_next(module_list);
+    }
+    free_module_list(module_list);
+
+    if (found && is_forward) {
+        std::transform(fwd_module.begin(), fwd_module.end(), fwd_module.begin(), ::tolower);
+        if (fwd_module.find(".dll") == std::string::npos) {
+            fwd_module += ".dll";
+        }
+        printf("[RESOLVE] %s is a forwarder -> %s!%s\n", func_name, fwd_module.c_str(),
+               fwd_func.c_str());
+        return find_export_address(env, fwd_module.c_str(), fwd_func.c_str(), out_addr, depth + 1);
+    }
+
+    return found;
+}
+
+static std::unordered_set<target_ulong> g_report_event_hooked_asids;
+
+bool register_hook(CPUState* env, target_ulong oldval, target_ulong newval) {
+    if (!g_initialized) {
+        if (!initialize_globals(env)) {
+            return false;
+        }
+    }
 
     target_ulong asid = panda_current_asid(env);
-    char* symbol = "ReportEventA";
-    struct symbol sym = __resolve_symbol(env, asid, "ADVAPI", symbol);
-    printf("[RESOLVE] %s resolved at address: 0x%lx (section: %s)\n", symbol, sym.address, sym.section);
+    if (g_report_event_hooked_asids.count(asid)) {
+        return false;
+    }
+
+    target_ulong address = 0;
+    if (!find_export_address(env, "advapi32.dll", "ReportEventA", &address)) {
+        return false;
+    }
+
+    printf("[RESOLVE] ReportEventA resolved at address: 0x%lx (asid: 0x%lx)\n",
+           (uint64_t)address, (uint64_t)asid);
+
+    struct symbol sym = {0};
+    sym.address = address;
+    strncpy(sym.name, "ReportEventA", sizeof(sym.name) - 1);
+    strncpy(sym.section, "advapi32.dll", sizeof(sym.section) - 1);
+
     struct hook h = {0};
-    h.addr = sym.address;
+    h.addr = address;
     h.asid = asid;
     h.type = PANDA_CB_BEFORE_BLOCK_EXEC;
     h.cb.start_block_exec = report_event_hook;
@@ -469,28 +711,7 @@ bool register_hook(CPUState* env) {
     h.context = NULL;
     __add_hook(&h);
 
-    // hook_registered = true;
-
-    // struct hook_symbol_resolve h = {0};
-    // strncpy(h.name, "syslog", 256);
-    // h.hook_offset = true;
-    // h.enabled = true;
-    // h.cb = on_syslog_resolved;
-    // h.id = id;
-
-    // __hook_symbol_resolution(&h);
-    // char* sym_str = "syslog";
-    // struct symbol sym = __resolve_symbol(env, asid, NULL, sym_str);
-    // printf("syslog address: 0x%lx\n", sym.address);
-    // if (sym.address) {
-    //     printf("[FORCE] __resolve_symbol resolved %s at 0x%lx\n", sym.name, sym.address);
-    // } else {
-    //     printf("[FORCE] __resolve_symbol failed to resolve %s\n", sym_str);
-    // }
-
-    // struct symbol matching = __get_best_matching_symbol(env, 0x7f4a4715e1a0, asid);
-    // printf("[MATCHING NAME] %s\n", matching.name);
-
+    g_report_event_hooked_asids.insert(asid);
     return false;
 }
 
@@ -870,20 +1091,6 @@ bool update_symbols(CPUState* env, target_ulong oldval, target_ulong newval)
                                                               i)) {
                     struct function_export function;
                     function.ordinal = i + mem_pe_export_table_get_base(in_memory_pe);
-                    if (strstr(fn_name, "Evt") || strstr(fn_name, "Event")) {
-                        printf("Function name: %s\n", fn_name);
-                    }
-                    if (strcmp(fn_name, "ReportEventA") == 0) {
-                        printf("Tracing ReportEventA\n");
-                        // uint64_t arg_val = g_os_manager->get_argument_value(env, 7, false);
-                        // uint64_t len = g_os_manager->get_argument_value(env, 6, false);
-                        CPUX86State* regs = (CPUX86State*) env;
-                        target_ulong rsp = regs->regs[R_ESP];
-                        target_ulong arg7_addr = rsp + 0x38;
-                        uint8_t read_buf[20];
-                        panda_virtual_memory_read(env, arg7_addr, read_buf, 20);
-                        printf("ReportEvent %s\n", (char*) read_buf);
-                    }
                     function.name = std::string(fn_name);
                     g_symbol_map[path][rva] = function;
                 }
@@ -906,28 +1113,30 @@ void register_panda_callbacks(void* self) {
     // pcb.after_loadvm = (reinterpret_cast<void (*)(CPUState*)>(init_log_detect));
     // panda_register_callback(self, PANDA_CB_AFTER_LOADVM, pcb);
 
-    pcb.after_loadvm = (reinterpret_cast<void (*)(CPUState*)>(register_hook));
-    panda_register_callback(self, PANDA_CB_AFTER_LOADVM, pcb);
+    // ReportEventA's address is per-process (module base is ASLR'd), so it
+    // must be re-resolved whenever we land on a new process rather than once
+    // at load time -- retried on every asid change until advapi32.dll is
+    // actually mapped and the export is found.
 
     // pcb.before_block_exec = register_hook;
     // panda_register_callback(self, PANDA_CB_BEFORE_BLOCK_EXEC, pcb);
 
-    // set_callstack_osi(g_current_osi);
-    // init_callstack_plugin(self, g_current_osi);
-    // register_callstack_callback("on_call", call_insn_callback);
+    set_callstack_osi(g_current_osi);
+    init_callstack_plugin(self, g_current_osi);
+    register_callstack_callback("on_call", call_insn_callback);
 
     // PPP_REG_CB("syscalls2", on_sys_syslog_enter, syslog_syscall_hook);
     // PPP_REG_CB("syscalls2", on_NtTraceEvent_enter, nt_trace_event_hook);
     // PPP_REG_CB("syscalls2", on_NtWriteFile_enter, nt_write_file_hook);
-    PPP_REG_CB("syscalls2", on_NtTraceControl_enter, nt_trace_control_hook);
+    // PPP_REG_CB("syscalls2", on_NtTraceControl_enter, nt_trace_control_hook);
     
-    // pcb.after_loadvm = (reinterpret_cast<void (*)(CPUState*)>(initialize_globals));
-    // panda_register_callback(self, PANDA_CB_AFTER_LOADVM, pcb);
-    // pcb.asid_changed = update_symbols;
-    // panda_register_callback(self, PANDA_CB_ASID_CHANGED, pcb);
-    // init_callstack_plugin(self, g_current_osi);
-    // register_callstack_callback("on_call", call_insn_callback);
-    // register_callstack_callback("on_ret", return_insn_callback);
+    pcb.after_loadvm = (reinterpret_cast<void (*)(CPUState*)>(initialize_globals));
+    panda_register_callback(self, PANDA_CB_AFTER_LOADVM, pcb);
+    pcb.asid_changed = register_hook;
+    panda_register_callback(self, PANDA_CB_ASID_CHANGED, pcb);
+    init_callstack_plugin(self, g_current_osi);
+    register_callstack_callback("on_call", call_insn_callback);
+    register_callstack_callback("on_ret", return_insn_callback);
 }
 
 
@@ -957,16 +1166,16 @@ bool init_plugin(void* self)
         return false;
     }
 
-    panda_arg_list* filter_args = panda_get_args("trace_filter");
-    const char* filter_file = strdup(panda_parse_string(filter_args, "file", ""));
+    // panda_arg_list* filter_args = panda_get_args("trace_filter");
+    // const char* filter_file = strdup(panda_parse_string(filter_args, "file", ""));
 
-    if (filter_file[0] == '\0') {
-        g_tracefilter.reset(new TraceFilter());
-    } else {
-        g_tracefilter.reset(new TraceFilter(filter_file));
-    }
+    // if (filter_file[0] == '\0') {
+    //     g_tracefilter.reset(new TraceFilter());
+    // } else {
+    //     g_tracefilter.reset(new TraceFilter(filter_file));
+    // }
 
-    panda_free_args(filter_args);
+    // panda_free_args(filter_args);
 
     panda_arg_list* args = panda_get_args("logging_events");
     const char* log_path = strdup(panda_parse_string(args, "output", "logging.jsonl"));
