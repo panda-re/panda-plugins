@@ -379,9 +379,14 @@ bool init_plugin(void* self)
     set_default_python_script();
 
     // Read arguments
-    const char* profile_arg = panda_os_name;
-    if (!profile_arg) {
+    if (!panda_os_name) {
         fprintf(stderr, "[%s] The -os <profile> flag is required\n", __FILE__);
+        return false;
+    }
+
+    // make sure we are on Windows
+    if (panda_os_familyno != OS_WINDOWS) {
+        fprintf(stderr, "[%s] Currently, only Windows is supported.\n", __FILE__);
         return false;
     }
 
