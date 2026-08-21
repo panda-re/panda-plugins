@@ -248,7 +248,7 @@ def memory_hashes_visitor(node, accumulator, cmd, vadinfo_data):
     return accumulator
 
 
-def get_pslist(available_automagics, filter_data):
+def get_pslist(available_automagics):
     """List all the tasks that aren't hidden, unlinked, etc"""
     
     config_path = "plugins.PsList"
@@ -261,11 +261,11 @@ def get_pslist(available_automagics, filter_data):
     treegrid = constructed.run()
     
     pslist_data = []
-    treegrid.visit(node=None, function=lambda node, acc: pslist_visitor(node, acc, filter_data), initial_accumulator=pslist_data)
+    treegrid.visit(node=None, function=lambda node, acc: pslist_visitor(node, acc), initial_accumulator=pslist_data)
     return pslist_data
         
 
-def pslist_visitor(node, accumulator, filter_data):
+def pslist_visitor(node, accumulator):
     if node.values:
         pid, ppid, img_name, offset = node.values[0:4]
         proc = ctx.object("symbol_table_name1!_EPROCESS", "layer_name", offset)
@@ -401,14 +401,14 @@ def run(filterfile):
             filter_data = json.load(fobj)
 
         analysis_results = {
-            "pslist": get_pslist(available_automagics, filter_data),
+            "pslist": get_pslist(available_automagics),
             "svcscan": get_svcscan(available_automagics),
             "sockets": get_sockets(available_automagics),
             "process_hashes": get_process_hashes(available_automagics, filter_data),
             "memory_hashes": get_memory_hashes(available_automagics, filter_data),
         }
     except Exception as err:
-        analysis_results = {"error": traceback.format_exc(err)}
+        analysis_results = {"error": traceback.format_exc()}
 
     json_str = json.dumps(analysis_results, indent=1)
     return json_str
