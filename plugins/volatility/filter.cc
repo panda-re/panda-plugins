@@ -23,7 +23,7 @@ InstrumentationFilter::InstrumentationFilter(const char* filter_file)
     filter_document.ParseStream(is);
 
     // threads (pid, tid, asid)
-    rapidjson::Value::ConstMemberIterator itr = filter_document.FindMember("threads");
+    rapidjson::Value::ConstMemberIterator itr = filter_document.FindMember("thread_whitelist");
 
     if (itr != filter_document.MemberEnd()) {
         assert(itr->value.IsArray());

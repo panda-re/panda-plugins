@@ -58,7 +58,6 @@ set(X64_PLUGIN_INCLUDES ${PLUGIN_INCLUDES} ${CMAKE_BINARY_DIR}/plugins-panda-bui
 include_directories(third-party) 
 
 add_subdirectory(net)
-add_subdirectory(network)
 add_subdirectory(res)
 add_subdirectory(network_pcap)
 add_subdirectory(ipanda)
@@ -70,4 +69,4 @@ add_subdirectory(callstack)
 add_subdirectory(apicall_tracer)
 add_subdirectory(memory_regions)
 add_subdirectory(pmemdump)
-#add_subdirectory(volatility)
+add_subdirectory(volatility)
