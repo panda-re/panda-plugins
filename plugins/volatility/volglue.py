@@ -22,7 +22,7 @@ from volatility3.framework import automagic, contexts, interfaces, plugins
 from volatility3.framework.layers.physical import FileLayer
 from volatility3.framework.layers.linear import LinearlyMappedLayer
 
-import socket, sys
+import socket
 from typing import Optional
 from pathlib import Path
 
@@ -409,7 +409,7 @@ def run(filterfile):
         }
     except Exception as err:
         analysis_results = {"error": traceback.format_exc()}
-        sys.exit(0)
+        raise Exception
 
     json_str = json.dumps(analysis_results, indent=1)
     return json_str

@@ -7,6 +7,8 @@ extern "C" {
 #include <errno.h>
 }
 #include <avro.h>
+#include <cstdlib>
+#include <exception>
 #include <libgen.h>
 #include <memory>
 #include <unistd.h>
@@ -188,10 +190,26 @@ int run_volatility_analysis(CPUState* env)
         }
     } else {
         // The function failed to return correctly
-        if (PyErr_Occurred()) {
-            PyErr_Print();
+
+        PyObject *exc_type, *exc_value, *exc_tb;
+        PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+        PyErr_NormalizeException(&exc_type, &exc_value, &exc_tb);
+
+        std::string message = "python call failed";
+        if (exc_value) {
+            PyObject* str_obj = PyObject_Str(exc_value);
+            if (str_obj) {
+                const char* utf8 = PyUnicode_AsUTF8(str_obj);
+                if (utf8) message = utf8;
+                Py_DECREF(str_obj);
+            }
         }
-        fprintf(stderr, "[%s] Didn't receive response from analysis!\n", __FILE__);
+
+        Py_XDECREF(exc_type);
+        Py_XDECREF(exc_value);
+        Py_XDECREF(exc_tb);
+
+        throw std::runtime_error(message);
     }
 
     Py_XDECREF(pargs); // pargs handles components refs
@@ -283,7 +301,20 @@ void before_block_exec(CPUState* env, TranslationBlock* tb)
         return;
     }
     
-    run_volatility_analysis(env);
+    try {
+        run_volatility_analysis(env);
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << std::endl;
+        Py_XDECREF(g_pfunc);
+        g_pfunc = NULL;
+        PyConfig_Clear(&config);
+        Py_Finalize();
+        teardown_avro();
+        unlink("mem.ram");
+
+        std::exit(EXIT_FAILURE);
+    }
+    
     unlink("mem.ram");
 
     // remove the thread now that we've handled it and make
