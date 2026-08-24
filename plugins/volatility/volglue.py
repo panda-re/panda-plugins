@@ -409,7 +409,7 @@ def run(filterfile):
         }
     except Exception as err:
         analysis_results = {"error": traceback.format_exc()}
-        raise Exception
+        raise urllib.error.URLError("Missing dependency")
 
     json_str = json.dumps(analysis_results, indent=1)
     return json_str

@@ -304,14 +304,14 @@ void before_block_exec(CPUState* env, TranslationBlock* tb)
     try {
         run_volatility_analysis(env);
     } catch (const std::exception& e) {
-        std::cerr << e.what() << std::endl;
+        fprintf(stderr, "[Volatility] fatal error, ending analysis: %s\n", e.what());
         Py_XDECREF(g_pfunc);
         g_pfunc = NULL;
         PyConfig_Clear(&config);
         Py_Finalize();
         teardown_avro();
         unlink("mem.ram");
-
+        panda_vm_quit();
         std::exit(EXIT_FAILURE);
     }
     
