@@ -6,10 +6,10 @@ either co-located with the plugin library. Results are stored as an `avro` recor
 
 This plugin takes in a PANDA recording and outputs an avro record file,`volatility.panda` containing a list of processes information (process hashes, socket information, etc)
 
-* A sample filter inupt file is require, it can be crafted as follows:
+* A sample filter input file is required, it can be crafted as follows:
 ```
 {
-  "threads": [
+  "thread_whitelist": [
     [
       pid,
       tid1,
@@ -30,10 +30,10 @@ This plugin takes in a PANDA recording and outputs an avro record file,`volatili
 ## Usage
 
 ### Running manually
-`volatility` plugin takes two arguments, `-os`, which asks for the type of operating system that the recording is used, and `--panda-arg filter=FILE.txt` to pass in the filter file to plugin. An example invocation: (NOTE: you need to have `RECORDING-rr-nondet.log`, `RECORDING-rr-snp`, and `filter.txt` in the path)
+`volatility` plugin takes two arguments, `-os`, which asks for the type of operating system that the recording is used, and `--panda-arg filter:file=filter.json` to pass in the filter file to plugin. An example invocation:
 
 ```bash
-panda-system-i386 -m 2048 -replay /path/to/RECORDING -panda 'volatility' -os windows-32-7sp1 --panda-arg filter:file=filter.txt
+panda-system-i386 -m 2048 -replay /path/to/RECORDING -panda 'volatility' -os windows-32-7sp1 --panda-arg filter:file=filter.json
 ```
 
 * To view the result avro record, we can use `jq` (a command line JSON processor for better visualization)

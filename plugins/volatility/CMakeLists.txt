@@ -2,7 +2,7 @@ set(PANDA_PLUGIN_NAME "volatility")
 set(PLUGIN_TARGET "panda_${PANDA_PLUGIN_NAME}")
 
 # The volatility plugin requires linking against python
-find_package(PythonLibs 2.7 REQUIRED) 
+find_package(PythonLibs 3.8 REQUIRED) 
 if (NOT PYTHONLIBS_FOUND)
 	message(FATAL_ERROR "Could not find python libraries. Is python-dev installed?")
 endif()
