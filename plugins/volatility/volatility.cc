@@ -380,6 +380,36 @@ char* read_script(const char* fpath)
     return script;
 }
 
+/**
+ * Resolve a "python3" executable via `/usr/bin/env`, same as a
+ * `#!/usr/bin/env python3` shebang would.
+ */
+std::string find_python3_on_path()
+{
+    FILE* pipe = popen(
+        "/usr/bin/env python3 -c 'import sys; print(sys.executable)' 2>/dev/null", "r");
+    if (!pipe) {
+        throw std::runtime_error("failed to invoke /usr/bin/env to locate python3");
+    }
+
+    char buffer[4096] = {0};
+    char* result = fgets(buffer, sizeof(buffer), pipe);
+    int status = pclose(pipe);
+
+    if (!result || status != 0) {
+        throw std::runtime_error("could not locate a python3 executable via /usr/bin/env");
+    }
+
+    std::string path(buffer);
+    while (!path.empty() && (path.back() == '\n' || path.back() == '\r')) {
+        path.pop_back();
+    }
+    if (path.empty()) {
+        throw std::runtime_error("could not locate a python3 executable via /usr/bin/env");
+    }
+    return path;
+}
+
 bool init_plugin(void* self)
 {
     PyObject* pmodule = NULL;
@@ -441,9 +471,14 @@ bool init_plugin(void* self)
         return false;
     }
 
-    const char* venv_path_cstr = std::getenv("VIRTUAL_ENV");
-    std::string venv_path(venv_path_cstr);
-    std::string exec_path = venv_path + "/bin/python";
+    std::string exec_path;
+    try {
+        exec_path = find_python3_on_path();
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[%s] %s\n", __FILE__, e.what());
+        free(script_contents);
+        return false;
+    }
     std::wstring w_exec(exec_path.begin(), exec_path.end());
 
     PyImport_AppendInittab("pandamem", PyInit_pandamem);
