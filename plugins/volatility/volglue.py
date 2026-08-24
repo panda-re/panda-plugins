@@ -408,8 +408,9 @@ def run(filterfile):
             "memory_hashes": get_memory_hashes(available_automagics, filter_data),
         }
     except Exception as err:
-        analysis_results = {"error": traceback.format_exc()}
-        raise urllib.error.URLError("Missing dependency")
+        raise RuntimeError(
+            "volatility analysis failed:\n{}".format(traceback.format_exc())
+        ) from err
 
     json_str = json.dumps(analysis_results, indent=1)
     return json_str

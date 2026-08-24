@@ -162,14 +162,13 @@ int run_volatility_analysis(CPUState* env)
 
     // Convert global strings to python strings
     PyObject* pfilter_str = PyUnicode_FromString(g_filter_path);
-
     PyObject* pargs = PyTuple_New(1);
 
     // Mildly concerned about death-by-oom
-    if (!pfilter_str) {
-        fprintf(stderr, "[%s] Failed to allocate args\n", __FILE__);
+    if (!pfilter_str || !pargs) {
         Py_XDECREF(pfilter_str);
         Py_XDECREF(pargs);
+        throw std::runtime_error("failed to allocate arguments for python call");
     }
 
     // Add these strings to an argument object
@@ -305,13 +304,7 @@ void before_block_exec(CPUState* env, TranslationBlock* tb)
         run_volatility_analysis(env);
     } catch (const std::exception& e) {
         fprintf(stderr, "[Volatility] fatal error, ending analysis: %s\n", e.what());
-        Py_XDECREF(g_pfunc);
-        g_pfunc = NULL;
-        PyConfig_Clear(&config);
-        Py_Finalize();
-        teardown_avro();
-        unlink("mem.ram");
-        panda_vm_quit();
+        uninit_plugin(nullptr);
         std::exit(EXIT_FAILURE);
     }
     
@@ -401,7 +394,14 @@ bool init_plugin(void* self)
     filter_path = panda_parse_string(filter_args, "file", "");
     strncpy(g_filter_path, filter_path, sizeof(g_filter_path) - 1);
     fprintf(stdout, "[Filter file]: %s\n", g_filter_path);
-    g_filter.reset(new InstrumentationFilter(g_filter_path));
+    try {
+        g_filter.reset(new InstrumentationFilter(g_filter_path));
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[%s] Failed to initialize instrumentation filter: %s\n",
+                __FILE__, e.what());
+        panda_free_args(filter_args);
+        return false;
+    }
     panda_free_args(filter_args);
 
     if (init_avro(output_path)) {
