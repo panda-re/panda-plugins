@@ -1,453 +1,357 @@
 #define PLUGIN_MAIN
 #define __STDC_FORMAT_MACROS
-#define OSI_TEST_ON_ASID_CHANGED
 
 extern "C" {
-    #include <Python.h>
     #include <dlfcn.h>
-    #include <errno.h>
 }
-#include <avro.h>
-#include <libgen.h>
-#include <memory>
-#include <unistd.h>
 
 #include "panda/plugin.h"
 #include "panda/common.h"
-#include "exec/cpu-defs.h"
-#include "ipanda/panda_x86.h"
-
 #include "ipanda/ipanda.h"
 #include "ipanda/manager.h"
-
+#include "osi/windows/manager.h"
+#include "osi/windows/pe.h"
 #include "osi/windows/wintrospection.h"
 
-#include "../volatility/filter.h"
+extern "C" {
+    #include "panda/plugins/dynamic_symbols/dynamic_symbols_int_fns.h"
+    #include "panda/plugins/hooks/hooks_int_fns.h"
+}
 
-// Globals to be set by configs, eventually
-char g_program_name[] = "logging_events_plugin";
-char g_module_name[] = "gluemod";
-char g_func_name[] = "run";
+#include <algorithm>
+#include <cctype>
+#include <cstring>
+#include <string>
+#include <unordered_set>
 
-char g_script_path[4096] = {0};
-
-char g_imagename[512] = "\0";
-char g_filter_path[512] = {0};
-const char g_script_name[] = "/evtxglue.py";
-
-// Globals
-std::shared_ptr<IntroPANDAManager> os_manager;
-std::shared_ptr<Windows7IntrospectionManager> g_os_manager;
-struct WindowsProcess* g_current_process = nullptr;
-
-std::shared_ptr<InstrumentationFilter> g_filter;
-bool g_check_for_process = true;
-bool g_targeted = true;
-
-static PyObject* g_pfunc = NULL;
-PyConfig config;
-
-static double percent = -1;
-
-#define CHECK_OR_DIE(_obj, _emsg, _elabel)                                               \
-    do {                                                                                 \
-        if (!_obj) {                                                                     \
-            if (PyErr_Occurred()) {                                                      \
-                PyErr_Print();                                                           \
-            }                                                                            \
-            fprintf(stderr, _emsg);                                                      \
-            goto _elabel;                                                                \
-        }                                                                                \
-    } while (0)
+// This is a from-scratch replacement for the ReportEventA hooking in
+// logging_events.cpp. Same underlying idea (resolve the export, hook it via
+// the `hooks` plugin, read the args off the stack) but:
+//   - covers both ReportEventA and ReportEventW
+//   - follows forwarder exports (advapi32.dll re-exports a lot of its API
+//     to sechost.dll/kernelbase.dll on modern Windows -- hooking the
+//     forwarder's advertised RVA directly is a silent no-op, since callers
+//     never actually execute there)
+//   - resolves per-asid off PANDA_CB_ASID_CHANGED instead of once at load,
+//     since module base addresses are per-process
 
 extern "C" {
     bool init_plugin(void*);
     void uninit_plugin(void*);
 }
 
-int run_evtx_analysis(CPUState* env);
-bool log_analysis_results(CPUState* env, const char* data);
+static const size_t MAX_FUNCTION_PROTOTYPE_SIZE = 512;
 
-static const uint8_t _zero_block[1024] = {0};
-static void actually_dump_physical_memory(FILE* out, size_t len)
-{
-    hwaddr addr = 0;
-    uint8_t block[sizeof(_zero_block)];
+std::shared_ptr<IntroPANDAManager> os_manager;
+static std::shared_ptr<Windows7IntrospectionManager> g_os_manager;
+static struct WindowsKernelOSI* g_kernel_osi = nullptr;
+static bool g_initialized = false;
 
-    if (!out)
-        return;
+typedef void (*__add_hook_t)(struct hook*);
+static __add_hook_t __add_hook = nullptr;
 
-    while (len != 0)
-    {
-        size_t l = sizeof(block);
-        if (l > len)
-            l = len;
-        if (panda_physical_memory_read(addr, block, l) == MEMTX_OK)
-            fwrite(block, 1, l, out);
-        else
-            fwrite(_zero_block, 1, l, out);
-        addr += l;
-        len -= l;
+typedef void (*__enable_hooking_t)();
+static __enable_hooking_t __enable_hooking = nullptr;
+
+static bool init_hooks_api() {
+    void* hooks = panda_get_plugin_by_name("hooks");
+    if (hooks == nullptr) {
+        panda_require("hooks");
+        hooks = panda_get_plugin_by_name("hooks");
     }
+    if (hooks == nullptr) {
+        return false;
+    }
+    __add_hook = (__add_hook_t) dlsym(hooks, "add_hook");
+    __enable_hooking = (__enable_hooking_t) dlsym(hooks, "enable_hooking");
+    return __add_hook != nullptr && __enable_hooking != nullptr;
 }
 
-static void dump_memory(char* filename, char* register_filename, uint64_t pmem_len){
-    FILE* out = fopen(filename, "wb");
+static bool initialize_globals(CPUState* env) {
+    if (!init_ipanda(env, os_manager)) {
+        fprintf(stderr, "[logging_events] Could not initialize introspection library\n");
+        return false;
+    }
+    g_os_manager = std::dynamic_pointer_cast<Windows7IntrospectionManager>(os_manager);
+    if (!g_os_manager) {
+        fprintf(stderr, "[logging_events] Guest is not Windows; this plugin is Windows-only\n");
+        return false;
+    }
+    g_kernel_osi = g_os_manager->get_kosi();
+    g_initialized = true;
+    return true;
+}
 
-    if (pmem_len == 0){
-        // dump all memory if not specified as arg
-        pmem_len = ram_size;
+// A PE export's table entry is normally an RVA to code. If the export is a
+// forwarder instead (e.g. advapi32.dll!SomeApi -> sechost.dll!SomeApi), that
+// RVA points at a null-terminated ASCII "ModuleName.FunctionName" string
+// rather than an instruction stream. Detect that case so we can chase it to
+// the real implementation instead of hooking dead address space.
+static bool try_read_forwarder(CPUState* env, target_ulong addr,
+                                std::string* out_module, std::string* out_func) {
+    char buf[128] = {0};
+    if (panda_virtual_memory_read(env, addr, (uint8_t*)buf, sizeof(buf) - 1) != 0) {
+        return false;
     }
 
-    actually_dump_physical_memory(out, pmem_len);
-    fclose(out);
-    if (register_filename)
-    {
-        if ((out = fopen(register_filename, "w")) != NULL)
-        {
-            CPUState* cpu;
-            CPU_FOREACH(cpu)
-            {
-                fprintf(out, "CPU#%d\n", cpu->cpu_index);
-                cpu_dump_state(cpu, out, fprintf, CPU_DUMP_FPU);
+    size_t dot = std::string::npos;
+    size_t len = 0;
+    for (; len < sizeof(buf) - 1 && buf[len]; len++) {
+        if (!isprint((unsigned char)buf[len])) {
+            return false;
+        }
+        if (buf[len] == '.' && dot == std::string::npos) {
+            dot = len;
+        }
+    }
+    if (len == 0 || dot == std::string::npos || dot == 0 || dot == len - 1) {
+        return false;
+    }
+
+    *out_module = std::string(buf, dot);
+    *out_func = std::string(buf + dot + 1, len - dot - 1);
+    return true;
+}
+
+// Windows-native PE export lookup: walks the current process's module list
+// and finds func_name's address in the export table of whichever module's
+// path contains module_substr. dynamic_symbols (this codebase's vendored
+// copy) only understands Linux ELF .so exports, so it can't be used here --
+// it would always return a zeroed symbol for a Windows DLL lookup.
+static bool find_export_address(CPUState* env, const char* module_substr,
+                                 const char* func_name, target_ulong* out_addr,
+                                 int depth = 0) {
+    if (depth > 4) {
+        // A forwarder chain this deep means something is misparsed --
+        // bail rather than loop.
+        return false;
+    }
+
+    auto process = kosi_get_current_process(g_kernel_osi);
+    auto module_list = get_module_list(g_kernel_osi, process_get_eprocess(process),
+                                       process_is_wow64(process));
+    free_process(process);
+
+    if (module_list == nullptr) {
+        return false;
+    }
+
+    bool found = false;
+    bool is_forward = false;
+    std::string fwd_module, fwd_func;
+    auto curr = module_list_next(module_list);
+    while (curr != nullptr) {
+        std::string path = std::string(module_entry_get_dllpath(curr));
+        std::transform(path.begin(), path.end(), path.begin(), ::tolower);
+
+        if (!found && path.find(module_substr) != std::string::npos) {
+            uint64_t base = module_entry_get_base_address(curr);
+            auto in_memory_pe = init_mem_pe(module_list_get_osi(module_list), base, false);
+
+            if (in_memory_pe && parse_exports(in_memory_pe)) {
+                size_t len = MAX_FUNCTION_PROTOTYPE_SIZE;
+                char fn_name[MAX_FUNCTION_PROTOTYPE_SIZE];
+                auto total = mem_pe_export_table_get_numberoffunctions(in_memory_pe);
+
+                for (uint32_t i = 0; i < total; i++) {
+                    memset(fn_name, '\0', len);
+                    if (mem_pe_export_table_get_name_by_table_idx(in_memory_pe, fn_name, &len, i) &&
+                        strcmp(fn_name, func_name) == 0) {
+                        auto rva = mem_pe_export_table_get_rva_by_table_idx(in_memory_pe, i);
+                        target_ulong candidate = base + rva;
+
+                        if (try_read_forwarder(env, candidate, &fwd_module, &fwd_func)) {
+                            is_forward = true;
+                        } else {
+                            *out_addr = candidate;
+                        }
+                        found = true;
+                        break;
+                    }
+                }
             }
-            fclose(out);
+            free_mem_pe(in_memory_pe);
+        }
+
+        free_module_entry(curr);
+        curr = module_list_next(module_list);
+    }
+    free_module_list(module_list);
+
+    if (found && is_forward) {
+        std::transform(fwd_module.begin(), fwd_module.end(), fwd_module.begin(), ::tolower);
+        if (fwd_module.find(".dll") == std::string::npos) {
+            fwd_module += ".dll";
+        }
+        printf("[RESOLVE] %s is a forwarder -> %s!%s\n", func_name, fwd_module.c_str(),
+               fwd_func.c_str());
+        return find_export_address(env, fwd_module.c_str(), fwd_func.c_str(), out_addr, depth + 1);
+    }
+
+    return found;
+}
+
+// x64 calling convention: args 1-4 in RCX/RDX/R8/R9, args 5+ spill to the
+// stack past the 0x20 shadow space. ReportEventA/W share this layout:
+//   BOOL ReportEventX(HANDLE hEventLog, WORD wType, WORD wCategory,
+//       DWORD dwEventID, PSID lpUserSid, WORD wNumStrings, DWORD dwDataSize,
+//       LPCXSTR *lpStrings, LPVOID lpRawData)
+// so at function entry (RSP == pointer to the return address), wNumStrings
+// (arg6) is at rsp+0x30 and lpStrings (arg8) is at rsp+0x40.
+static void read_report_event_strings(CPUState* env, const char* api_name, bool wide) {
+    CPUX86State* regs = (CPUX86State*) env->env_ptr;
+    target_ulong rsp = regs->regs[R_ESP];
+    target_ulong num_strings_addr = rsp + 0x30;
+    target_ulong lp_strings_addr = rsp + 0x40;
+
+    const char* proc_name = "<unknown>";
+    struct WindowsProcess* process = nullptr;
+    if (g_initialized) {
+        process = kosi_get_current_process(g_kernel_osi);
+        if (process) {
+            proc_name = process_get_shortname(process);
         }
     }
 
-    panda_replay_end();
-}
+    uint8_t stack_dump[0x60] = {0};
+    bool have_dump = panda_virtual_memory_read(env, rsp, stack_dump, sizeof(stack_dump)) == 0;
 
-/**
- * Run the evtxtract analysis, passing the image name
- * as a python string. Stores the results in the panda log or writes them
- * to stderr
- */
-int run_evtx_analysis(CPUState* env)
-{
-    dump_memory("mem.ram", "mem.regs.txt", 0);
-    PyObject* pimage_name = PyUnicode_FromString(g_imagename);
-    PyObject* pfilter_str = PyUnicode_FromString(g_filter_path);
+    uint16_t num_strings = 0;
+    panda_virtual_memory_read(env, num_strings_addr, (uint8_t*)&num_strings, sizeof(num_strings));
 
-    PyObject* pargs = PyTuple_New(1);
+    target_ulong lp_strings = 0;
+    panda_virtual_memory_read(env, lp_strings_addr, (uint8_t*)&lp_strings, sizeof(lp_strings));
 
-    // Mildly concerned about death-by-oom
-    if (!pimage_name) {
-        fprintf(stderr, "[%s] Failed to allocate args\n", __FILE__);
-        Py_XDECREF(pimage_name);
-        Py_XDECREF(pargs);
+    printf("[%s] proc=%s asid=0x%lx rsp=0x%lx %u string(s) at 0x%lx\n", api_name, proc_name,
+           (uint64_t)panda_current_asid(env), (uint64_t)rsp, num_strings, (uint64_t)lp_strings);
+
+    if (have_dump) {
+        printf("  stack [rsp, rsp+0x60):");
+        for (size_t i = 0; i < sizeof(stack_dump); i++) {
+            if (i % 8 == 0) printf("\n   +0x%02zx:", i);
+            printf(" %02x", stack_dump[i]);
+        }
+        printf("\n");
+    } else {
+        printf("  stack [rsp, rsp+0x60): <unreadable>\n");
     }
 
-    // Add these strings to an argument object
-    PyTuple_SetItem(pargs, 0, pimage_name);
-    // PyTuple_SetItem(pargs, 1, pfilter_str);
+    if (process) {
+        free_process(process);
+    }
 
-    // Call run(imagename)
-    PyObject* pvalue = PyObject_CallObject(g_pfunc, pargs);
-    if (pvalue) {
-        // The function returned a value successfully
-        if (PyUnicode_Check(pvalue)) {
-            const char* json_str = PyUnicode_AsUTF8(pvalue);
-            fprintf(stdout, "%s\n", json_str);
-            if (log_analysis_results(env, json_str)) {
-                fprintf(stderr, "[%s] Failed to record result!\n", __FILE__);
+    for (uint16_t i = 0; i < num_strings && lp_strings; i++) {
+        target_ulong str_ptr = 0;
+        target_ulong entry_addr = lp_strings + i * sizeof(target_ulong);
+        if (panda_virtual_memory_read(env, entry_addr, (uint8_t*)&str_ptr, sizeof(str_ptr)) != 0 ||
+            !str_ptr) {
+            printf("  [%u] <unreadable pointer>\n", i);
+            continue;
+        }
+
+        if (!wide) {
+            uint8_t buf[512] = {0};
+            if (panda_virtual_memory_read(env, str_ptr, buf, sizeof(buf) - 1) == 0) {
+                printf("  [%u] %s\n", i, (char*)buf);
+            } else {
+                printf("  [%u] <unreadable string>\n", i);
             }
         } else {
-            fprintf(stderr, "[%s] Return value was not a string!\n", __FILE__);
+            uint16_t wbuf[512] = {0};
+            if (panda_virtual_memory_read(env, str_ptr, (uint8_t*)wbuf, sizeof(wbuf) - 2) == 0) {
+                std::string decoded;
+                for (size_t j = 0; j < 511 && wbuf[j]; j++) {
+                    decoded += (wbuf[j] < 128) ? (char)wbuf[j] : '?';
+                }
+                printf("  [%u] %s\n", i, decoded.c_str());
+            } else {
+                printf("  [%u] <unreadable string>\n", i);
+            }
         }
-    } else {
-        // The function failed to return correctly
-        if (PyErr_Occurred()) {
-            PyErr_Print();
-        }
-        fprintf(stderr, "[%s] Didn't receive response from analysis!\n", __FILE__);
     }
-
-    Py_XDECREF(pargs); // pargs handles components refs
-    Py_XDECREF(pvalue);
-    return 0;
 }
 
-avro_schema_t g_schema = nullptr;
-avro_file_writer_t g_db = nullptr;
-
-bool init_avro(const char* dbname)
-{
-    int status = 0;
-
-    // Initialize the schema for a memstring
-    g_schema = avro_schema_record("logging_events", NULL);
-    avro_schema_record_field_append(g_schema, "rrindex", avro_schema_long());
-    avro_schema_record_field_append(g_schema, "results", avro_schema_string());
-
-    remove(dbname);
-
-    status = avro_file_writer_create_with_codec(dbname, g_schema, &g_db, "deflate",
-                                                512 * 1024 * 1024);
-    if (status) {
-        fprintf(stderr, "[%s] Avro failed to open %s for writing\n", __FILE__, dbname);
-        fprintf(stderr, "[E] error message: %s\n", avro_strerror());
-        return true;
-    }
-    fprintf(stdout, "Writing analysis results to %s\n", dbname);
-    return false;
+void report_event_a_hook(CPUState* env, TranslationBlock* tb, struct hook* h) {
+    read_report_event_strings(env, "ReportEventA", false);
 }
 
-void teardown_avro()
-{
-    avro_file_writer_close(g_db);
-    avro_schema_decref(g_schema);
+void report_event_w_hook(CPUState* env, TranslationBlock* tb, struct hook* h) {
+    read_report_event_strings(env, "ReportEventW", true);
 }
 
-bool log_analysis_results(CPUState* env, const char* data)
-{
-    avro_datum_t log_dt = avro_record(g_schema);
-    avro_datum_t rrindex_dt = avro_int64((int64_t)rr_get_guest_instr_count());
-    avro_datum_t result_dt = avro_string(data);
+typedef void (*report_event_cb_t)(CPUState*, TranslationBlock*, struct hook*);
 
-    if (avro_record_set(log_dt, "rrindex", rrindex_dt)) {
-        fprintf(stderr, "Avro failed to add rrindex to record\n");
-        return true;
-    }
-    if (avro_record_set(log_dt, "results", result_dt)) {
-        fprintf(stderr, "[E] Avro failed to build logging result: %s\n",
-                avro_strerror());
-        return true;
-    }
-
-    if (avro_file_writer_append(g_db, log_dt)) {
-        fprintf(stderr, "[E] Avro failed to write logging: %s\n", avro_strerror());
-        return true;
-    }
-    avro_datum_decref(result_dt);
-    avro_datum_decref(rrindex_dt);
-    avro_datum_decref(log_dt);
-    return false;
-}
-
-void before_block_exec(CPUState* env, TranslationBlock* tb)
-{
-    auto kosi = g_os_manager->get_kosi();
-
-    if (g_check_for_process) {
-        free_process(g_current_process);
-
-        g_current_process = kosi_get_current_process(kosi);
-        g_targeted = g_filter->thread_check(process_get_pid(g_current_process),
-                                            process_get_asid(g_current_process));
-
-        g_check_for_process = false;
-    }
-
-    if (!g_targeted) {
-        return;
-    }
-
-    auto pid = process_get_pid(g_current_process);
-    auto asid = process_get_asid(g_current_process);
-    auto tid = kosi_get_current_tid(kosi);
-
-    if (!g_filter->thread_check(pid, asid, tid)) {
-        return;
-    }
-
-    run_evtx_analysis(env);
-
-    // remove the thread now that we've handled it and make
-    // the next bb refresh state info
-    g_filter->remove_thread(pid, asid, tid);
-    g_check_for_process = true;
-
-    return;
-}
-
-bool check_for_process(CPUState* env, target_ulong oldval, target_ulong newval)
-{
-    g_check_for_process = true;
-    return 0;
-}
-
-/**
- * Set the path to the default python script, which should be
- * in the same directory as the shared object
- */
-void set_default_python_script()
-{
-    Dl_info dl_info;
-    dladdr((void*)set_default_python_script, &dl_info);
-
-    if (dl_info.dli_sname == NULL) {
-        fprintf(stderr, "[%s] Failed to locate logging_events plugin shared object!\n",
-                __FILE__);
-        return;
-    }
-
-    const char* lib_path = dl_info.dli_fname;
-    char* tmp_lib = strdup(lib_path);
-    char* dir_path = dirname(tmp_lib);
-
-    strncpy(g_script_path, dir_path, sizeof(g_script_path) - 1);
-    strncat(g_script_path, g_script_name, sizeof(g_script_path) - 1);
-    free(tmp_lib);
-}
-
-char* read_script(const char* fpath)
-{
-    fprintf(stdout, "Reading python script from %s\n", fpath);
-    FILE* fp = fopen(fpath, "r");
-    if (fp == NULL) {
-        fprintf(stderr, "[E] Failed to open %s: %s\n", fpath, strerror(errno));
-        return NULL;
-    }
-
-    fseek(fp, 0, SEEK_END);
-    int len = ftell(fp);
-
-    char* script = (char*)malloc(len + 1);
-    if (!script) {
-        fprintf(stderr, "[%s] Failed to allocate storage for python script of size %d\n",
-                __FILE__, len + 1);
-        return NULL;
-    }
-
-    fseek(fp, 0, SEEK_SET);
-    int bytes_read = fread(script, 1, len, fp);
-    if (bytes_read != len) {
-        fprintf(stderr, "[%s] Failed to read entire python script (%d / %d)!\n", __FILE__,
-                bytes_read, len);
-        free(script);
-        return NULL;
-    }
-
-    script[len] = '\0';
-    return script;
-}
-
-bool init_plugin(void* self)
-{
-    PyObject* pmodule = NULL;
-    PyObject* pcode = NULL;
-    const char* output_path = nullptr;
-    const char* filter_path = nullptr;
-
-    panda_arg_list* log_args = panda_get_args("logging_events");
-    output_path = panda_parse_string(log_args, "output", "logging_events.panda");
-
-    panda_arg_list* filter_args = panda_get_args("filter");
-    filter_path = panda_parse_string(filter_args, "file", "");
-    strncpy(g_filter_path, filter_path, sizeof(g_filter_path) - 1);
-    g_filter.reset(new InstrumentationFilter(g_filter_path));
-    panda_free_args(filter_args);
-
-    if (init_avro(output_path)) {
-        return false;
-    }
-    set_default_python_script();
-
-    // Read arguments
-    const char* profile_arg = panda_os_name;
-    if (!profile_arg) {
-        fprintf(stderr, "[%s] The -os <profile> flag is required\n", __FILE__);
+static bool resolve_and_hook(CPUState* env, target_ulong asid, const char* func_name,
+                              report_event_cb_t cb) {
+    target_ulong address = 0;
+    if (!find_export_address(env, "advapi32.dll", func_name, &address)) {
         return false;
     }
 
-    strncat(g_imagename, "mem.ram", sizeof(g_imagename) - 1);
+    const char* proc_name = "<unknown>";
+    struct WindowsProcess* process = kosi_get_current_process(g_kernel_osi);
+    if (process) {
+        proc_name = process_get_shortname(process);
+    }
+    printf("[RESOLVE] %s resolved at 0x%lx (asid: 0x%lx, proc: %s)\n", func_name, (uint64_t)address,
+           (uint64_t)asid, proc_name);
+    if (process) {
+        free_process(process);
+    }
 
-    const char* python_script = panda_parse_string(log_args, "script", g_script_path);
+    struct hook h = {0};
+    h.addr = address;
+    h.asid = asid;
+    h.type = PANDA_CB_BEFORE_BLOCK_EXEC;
+    h.cb.before_block_exec = cb;
+    h.km = MODE_ANY;
+    h.enabled = true;
+    strncpy(h.sym.name, func_name, sizeof(h.sym.name) - 1);
+    strncpy(h.sym.section, "advapi32.dll", sizeof(h.sym.section) - 1);
+    h.sym.address = address;
+    __add_hook(&h);
+    return true;
+}
 
-    panda_free_args(log_args);
+static std::unordered_set<target_ulong> g_hooked_asids;
+
+bool register_report_event_hooks(CPUState* env, target_ulong oldval, target_ulong newval) {
+    if (!g_initialized && !initialize_globals(env)) {
+        return false;
+    }
+
+    target_ulong asid = panda_current_asid(env);
+    if (g_hooked_asids.count(asid)) {
+        return false;
+    }
+
+    // advapi32.dll might not be mapped into this process yet -- if neither
+    // export resolves, leave this asid out of g_hooked_asids so we retry on
+    // the next switch back into it.
+    bool found_a = resolve_and_hook(env, asid, "ReportEventA", report_event_a_hook);
+    bool found_w = resolve_and_hook(env, asid, "ReportEventW", report_event_w_hook);
+    if (found_a || found_w) {
+        g_hooked_asids.insert(asid);
+    }
+
+    return false;
+}
+
+bool init_plugin(void* self) {
+    panda_require("hooks");
+    if (!init_hooks_api()) {
+        fprintf(stderr, "[logging_events_new] Failed to resolve hooks plugin API\n");
+        return false;
+    }
 
     panda_cb pcb;
-    pcb.asid_changed = check_for_process;
+    pcb.asid_changed = register_report_event_hooks;
     panda_register_callback(self, PANDA_CB_ASID_CHANGED, pcb);
-    pcb.before_block_exec = before_block_exec;
-    panda_register_callback(self, PANDA_CB_BEFORE_BLOCK_EXEC, pcb);
+    pcb.after_loadvm = (reinterpret_cast<void (*)(CPUState*)>(initialize_globals));
+    panda_register_callback(self, PANDA_CB_AFTER_LOADVM, pcb);
 
-    // This hack can be avoided by working with PANDA
-    // to expose the python shared library
-    dlopen("libpython3.8.so", RTLD_LAZY | RTLD_GLOBAL);
-
-    char* script_contents = read_script(python_script);
-    if (!script_contents) {
-        fprintf(stderr, "[%s] Failed to open python script!\n", __FILE__);
-        return false;
-    }
-
-    const char* venv_path_cstr = std::getenv("VIRTUAL_ENV");
-    std::string venv_path(venv_path_cstr);
-    std::string exec_path = venv_path + "/bin/python";
-    std::wstring w_venv_path(venv_path.begin(), venv_path.end());
-    std::wstring w_exec(exec_path.begin(), exec_path.end());
-
-    Py_SetProgramName((wchar_t*) g_program_name);
-    PyConfig_InitPythonConfig(&config);
-    PyConfig_SetString(&config, &config.executable, w_exec.c_str());
-    Py_InitializeFromConfig(&config);
-
-    // Load the program as a code object
-    pcode = Py_CompileString(script_contents, "evtxglue.py", Py_file_input);
-    CHECK_OR_DIE(pcode, "Failed to compile python program!\n", cleanup);
-
-    // Load the code object into a module
-    // fprintf(stdout, "Module name: %s\n", g_module_name);
-    pmodule = PyImport_ExecCodeModule("gluemod", pcode);
-    CHECK_OR_DIE(pmodule, "Failed to load as module!\n", cleanup);
-
-    // Extract the entry point of our new module
-    g_pfunc = PyObject_GetAttrString(pmodule, g_func_name);
-    CHECK_OR_DIE(g_pfunc, "Failed to find function!\n", cleanup);
-
-    if (!PyCallable_Check(g_pfunc)) {
-        fprintf(stderr, "[%s] Object %s is not a callable!\n", __FILE__, g_func_name);
-        goto cleanup;
-    }
-
-    fprintf(stdout, "Successfully initialized python routines.\n");
-
-
-    if (script_contents) {
-        free(script_contents);
-    }
-    Py_XDECREF(pcode);
-    pcode = NULL;
-    Py_XDECREF(pmodule);
-    pmodule = NULL;
-
-    if (!init_ipanda(self, os_manager)) {
-        fprintf(stderr, "Could not initialize the introspection library.\n");
-        goto cleanup;
-    }
-
-    // temporary -- forcing to be windows specific so i don't have to edit any more code
-    // in this plugin
-    g_os_manager = std::dynamic_pointer_cast<Windows7IntrospectionManager>(os_manager);
-
+    __enable_hooking();
     return true;
-
-cleanup:
-    // If we can't load everything, explode
-    if (script_contents) {
-        free(script_contents);
-    }
-    Py_XDECREF(pcode);
-    pcode = NULL;
-    Py_XDECREF(pmodule);
-    pmodule = NULL;
-    Py_XDECREF(g_pfunc);
-    g_pfunc = NULL;
-    PyConfig_Clear(&config);
-    unlink("mem.ram");
-    unlink("mem.regs.txt");
-    return false;
 }
 
-void uninit_plugin(void* self)
-{
-    Py_XDECREF(g_pfunc);
-    g_pfunc = NULL;
-    PyConfig_Clear(&config);
-    Py_Finalize();
-    teardown_avro();
-    unlink("mem.ram");
-    unlink("mem.regs.txt");
-}
+void uninit_plugin(void* self) {}
