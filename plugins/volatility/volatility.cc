@@ -7,6 +7,8 @@ extern "C" {
 #include <errno.h>
 }
 #include <avro.h>
+#include <cstdlib>
+#include <exception>
 #include <libgen.h>
 #include <memory>
 #include <unistd.h>
@@ -22,7 +24,6 @@ extern "C" {
 #include "osi/windows/wintrospection.h"
 
 #include "filter.h"
-#include "memory-server.h"
 
 // Globals to be set by configs, eventually
 char g_program_name[] = "volatility_plugin";
@@ -31,12 +32,10 @@ char g_func_name[] = "run";
 
 char g_script_path[4096] = {0};
 
-// Globals to be calculated by the plugin, eventually
 char g_profile[512] = {0};
 
 // Constants
-#define SOCKET_PATH_FMT "/tmp/panda%d.sock"
-char g_location[512] = "file://\0";
+#define TARGET_PAGE_SIZE 1024
 char g_filter_path[512] = {0};
 const char g_script_name[] = "/volglue.py";
 
@@ -50,6 +49,7 @@ bool g_check_for_process = true;
 bool g_targeted = true;
 
 static PyObject* g_pfunc = NULL;
+PyConfig config;
 
 #define CHECK_OR_DIE(_obj, _emsg, _elabel)                                               \
     do {                                                                                 \
@@ -71,40 +71,116 @@ void uninit_plugin(void*);
 int run_volatility_analysis(CPUState* env);
 bool log_analysis_results(CPUState* env, const char* data);
 
+
+void panda_memsavep(char* filename) {
+    FILE* f = fopen(filename, "wb");
+    if (!f) return;
+
+    uint8_t mem_buf[TARGET_PAGE_SIZE];
+    uint8_t zero_buf[TARGET_PAGE_SIZE];
+    memset(zero_buf, 0, TARGET_PAGE_SIZE);
+    int res;
+    ram_addr_t addr;
+    for (addr = 0; addr < ram_size; addr += TARGET_PAGE_SIZE) {
+        res = panda_physical_memory_rw(addr, mem_buf, TARGET_PAGE_SIZE, 0);
+        if (res == -1) { // I/O. Just fill page with zeroes.
+            fwrite(zero_buf, TARGET_PAGE_SIZE, 1, f);
+        }
+        else {
+            fwrite(mem_buf, TARGET_PAGE_SIZE, 1, f);
+        }
+    }
+    fclose(f);
+}
+
+static PyObject* pandamem_read_physical(PyObject* self, PyObject* args) {
+    unsigned long long addr;
+    unsigned long long size;
+    
+    if (!PyArg_ParseTuple(args, "KK", &addr, &size)) {
+       return NULL;
+    }
+
+    // Limit single read size to prevent excessive allocation
+    if (size > ram_size) {
+        PyErr_SetString(PyExc_ValueError, "Read size too large (max 2GB)");
+        return NULL;
+    }
+
+    uint8_t* buffer = (uint8_t*)malloc(size);
+    if (!buffer) {
+        return PyErr_NoMemory();
+    }
+
+    int res = panda_physical_memory_rw(addr, buffer, size, 0);
+
+    if (res == MEMTX_OK) {
+        PyObject* bytes = PyBytes_FromStringAndSize((char*) buffer, size);
+        free(buffer);
+        return bytes;
+    } else {
+        memset(buffer, 0, size);
+        PyObject* bytes = PyBytes_FromStringAndSize((char*)buffer, size);
+        free(buffer);
+        return bytes;
+    }
+}
+
+static PyObject* pandamem_get_ram_size(PyObject* self, PyObject* args) {
+    return PyLong_FromUnsignedLongLong(ram_size);
+}
+
+static PyMethodDef PandaMemoryMethods[] = {
+    {"read_physical", pandamem_read_physical, METH_VARARGS,
+     "Read physical memory: read_physical(addr, size) -> bytes"},
+    {"get_ram_size", pandamem_get_ram_size, METH_NOARGS,
+     "Get total RAM size: get_ram_size() -> int"},
+    {NULL, NULL, NULL, NULL}
+};
+
+static struct PyModuleDef pandamemmodule = {
+    PyModuleDef_HEAD_INIT,
+    "pandamem",
+    "PANDA direct memory access module",
+    -1,
+    PandaMemoryMethods
+};
+
+PyMODINIT_FUNC PyInit_pandamem(void) {
+    return PyModule_Create(&pandamemmodule);
+}
+
 /**
- * Run the volatility analysis, passing the desired profile and args
- * as python strings. Stores the results in the panda log or writes them
+ * Run the volatility analysis, passing the filter as a
+ * python string. Stores the results in the panda log or writes them
  * to stderr
  */
 int run_volatility_analysis(CPUState* env)
 {
-    // Convert global strings to python strings
-    PyObject* pprofile_str = PyString_FromString(g_profile);
-    PyObject* plocation_str = PyString_FromString(g_location);
-    PyObject* pfilter_str = PyString_FromString(g_filter_path);
+    // Dump RAM at this moment
+    panda_memsavep("mem.ram");
 
-    PyObject* pargs = PyTuple_New(3);
+    // Convert global strings to python strings
+    PyObject* pfilter_str = PyUnicode_FromString(g_filter_path);
+    PyObject* pargs = PyTuple_New(1);
 
     // Mildly concerned about death-by-oom
-    if (!pprofile_str || !plocation_str || !pfilter_str || !pargs) {
-        fprintf(stderr, "[%s] Failed to allocate args\n", __FILE__);
-        Py_XDECREF(pprofile_str);
-        Py_XDECREF(plocation_str);
+    if (!pfilter_str || !pargs) {
         Py_XDECREF(pfilter_str);
         Py_XDECREF(pargs);
+        throw std::runtime_error("failed to allocate arguments for python call");
     }
 
     // Add these strings to an argument object
-    PyTuple_SetItem(pargs, 0, pprofile_str);
-    PyTuple_SetItem(pargs, 1, plocation_str);
-    PyTuple_SetItem(pargs, 2, pfilter_str);
+    PyTuple_SetItem(pargs, 0, pfilter_str);
 
-    // Call run(profile, location)
+    // Call run(filter)
     PyObject* pvalue = PyObject_CallObject(g_pfunc, pargs);
     if (pvalue) {
         // The function returned a value successfully
-        if (PyString_Check(pvalue)) {
-            const char* json_str = PyString_AsString(pvalue);
+        if (PyUnicode_Check(pvalue)) {
+            const char* json_str = PyUnicode_AsUTF8(pvalue);
+            fprintf(stdout, "%s\n", json_str);
             if (log_analysis_results(env, json_str)) {
                 fprintf(stderr, "[%s] Failed to record result!\n", __FILE__);
             }
@@ -113,10 +189,26 @@ int run_volatility_analysis(CPUState* env)
         }
     } else {
         // The function failed to return correctly
-        if (PyErr_Occurred()) {
-            PyErr_Print();
+
+        PyObject *exc_type, *exc_value, *exc_tb;
+        PyErr_Fetch(&exc_type, &exc_value, &exc_tb);
+        PyErr_NormalizeException(&exc_type, &exc_value, &exc_tb);
+
+        std::string message = "python call failed";
+        if (exc_value) {
+            PyObject* str_obj = PyObject_Str(exc_value);
+            if (str_obj) {
+                const char* utf8 = PyUnicode_AsUTF8(str_obj);
+                if (utf8) message = utf8;
+                Py_DECREF(str_obj);
+            }
         }
-        fprintf(stderr, "[%s] Didn't receive response from analysis!\n", __FILE__);
+
+        Py_XDECREF(exc_type);
+        Py_XDECREF(exc_value);
+        Py_XDECREF(exc_tb);
+
+        throw std::runtime_error(message);
     }
 
     Py_XDECREF(pargs); // pargs handles components refs
@@ -191,13 +283,14 @@ void before_block_exec(CPUState* env, TranslationBlock* tb)
         g_current_process = kosi_get_current_process(kosi);
         g_targeted = g_filter->thread_check(process_get_pid(g_current_process),
                                             process_get_asid(g_current_process));
-
+        
         g_check_for_process = false;
     }
 
     if (!g_targeted) {
         return;
     }
+
 
     auto pid = process_get_pid(g_current_process);
     auto asid = process_get_asid(g_current_process);
@@ -206,8 +299,16 @@ void before_block_exec(CPUState* env, TranslationBlock* tb)
     if (!g_filter->thread_check(pid, asid, tid)) {
         return;
     }
-
-    run_volatility_analysis(env);
+    
+    try {
+        run_volatility_analysis(env);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[Volatility] fatal error, ending analysis: %s\n", e.what());
+        uninit_plugin(nullptr);
+        std::exit(EXIT_FAILURE);
+    }
+    
+    unlink("mem.ram");
 
     // remove the thread now that we've handled it and make
     // the next bb refresh state info
@@ -279,6 +380,36 @@ char* read_script(const char* fpath)
     return script;
 }
 
+/**
+ * Resolve a "python3" executable via `/usr/bin/env`, same as a
+ * `#!/usr/bin/env python3` shebang would.
+ */
+std::string find_python3_on_path()
+{
+    FILE* pipe = popen(
+        "/usr/bin/env python3 -c 'import sys; print(sys.executable)' 2>/dev/null", "r");
+    if (!pipe) {
+        throw std::runtime_error("failed to invoke /usr/bin/env to locate python3");
+    }
+
+    char buffer[4096] = {0};
+    char* result = fgets(buffer, sizeof(buffer), pipe);
+    int status = pclose(pipe);
+
+    if (!result || status != 0) {
+        throw std::runtime_error("could not locate a python3 executable via /usr/bin/env");
+    }
+
+    std::string path(buffer);
+    while (!path.empty() && (path.back() == '\n' || path.back() == '\r')) {
+        path.pop_back();
+    }
+    if (path.empty()) {
+        throw std::runtime_error("could not locate a python3 executable via /usr/bin/env");
+    }
+    return path;
+}
+
 bool init_plugin(void* self)
 {
     PyObject* pmodule = NULL;
@@ -292,7 +423,15 @@ bool init_plugin(void* self)
     panda_arg_list* filter_args = panda_get_args("filter");
     filter_path = panda_parse_string(filter_args, "file", "");
     strncpy(g_filter_path, filter_path, sizeof(g_filter_path) - 1);
-    g_filter.reset(new InstrumentationFilter(g_filter_path));
+    fprintf(stdout, "[Filter file]: %s\n", g_filter_path);
+    try {
+        g_filter.reset(new InstrumentationFilter(g_filter_path));
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[%s] Failed to initialize instrumentation filter: %s\n",
+                __FILE__, e.what());
+        panda_free_args(filter_args);
+        return false;
+    }
     panda_free_args(filter_args);
 
     if (init_avro(output_path)) {
@@ -301,98 +440,19 @@ bool init_plugin(void* self)
     set_default_python_script();
 
     // Read arguments
-    const char* profile_arg = panda_os_name;
-    const char* profile = nullptr; // volatility profile
-    if (!profile_arg) {
+    if (!panda_os_name) {
         fprintf(stderr, "[%s] The -os <profile> flag is required\n", __FILE__);
-        return false;
-    } else if (strcasecmp(profile_arg, "windows-64-vistasp0") == 0) {
-        profile = "VistaSP0x64";
-    } else if (strcasecmp(profile_arg, "windows-32-vistasp0") == 0) {
-        profile = "VistaSP0x86";
-    } else if (strcasecmp(profile_arg, "windows-64-vistasp1") == 0) {
-        profile = "VistaSP1x64";
-    } else if (strcasecmp(profile_arg, "windows-32-vistasp1") == 0) {
-        profile = "VistaSP1x86";
-    } else if (strcasecmp(profile_arg, "windows-64-vistasp2") == 0) {
-        profile = "VistaSP2x64";
-    } else if (strcasecmp(profile_arg, "windows-32-vistasp2") == 0) {
-        profile = "VistaSP2x86";
-    } else if (strcasecmp(profile_arg, "windows-64-10x64sp0") == 0) {
-        profile = "Win10x64";
-    } else if (strcasecmp(profile_arg, "windows-32-10x86sp0") == 0) {
-        profile = "Win10x86";
-    } else if (strcasecmp(profile_arg, "windows-32-2003sp0") == 0) {
-        profile = "Win2003SP0x86";
-    } else if (strcasecmp(profile_arg, "windows-64-2003sp1") == 0) {
-        profile = "Win2003SP1x64";
-    } else if (strcasecmp(profile_arg, "windows-32-2003sp1") == 0) {
-        profile = "Win2003SP1x86";
-    } else if (strcasecmp(profile_arg, "windows-64-2003sp2") == 0) {
-        profile = "Win2003SP2x64";
-    } else if (strcasecmp(profile_arg, "windows-32-2003sp2") == 0) {
-        profile = "Win2003SP2x86";
-    } else if (strcasecmp(profile_arg, "windows-64-2008r2sp0") == 0) {
-        profile = "Win2008R2SP0x64";
-    } else if (strcasecmp(profile_arg, "windows-64-2008r2sp1") == 0) {
-        profile = "Win2008R2SP1x64";
-    } else if (strcasecmp(profile_arg, "windows-64-2008sp1") == 0) {
-        profile = "Win2008SP1x64";
-    } else if (strcasecmp(profile_arg, "windows-32-2008sp1") == 0) {
-        profile = "Win2008SP1x86";
-    } else if (strcasecmp(profile_arg, "windows-64-2008sp2") == 0) {
-        profile = "Win2008SP2x64";
-    } else if (strcasecmp(profile_arg, "windows-32-2008sp2") == 0) {
-        profile = "Win2008SP2x86";
-    } else if (strcasecmp(profile_arg, "windows-64-2012r2sp0") == 0) {
-        profile = "Win2012R2x64";
-    } else if (strcasecmp(profile_arg, "windows-64-2012sp0") == 0) {
-        profile = "Win2012x64";
-    } else if (strcasecmp(profile_arg, "windows-64-7sp0") == 0) {
-        profile = "Win7SP0x64";
-    } else if (strcasecmp(profile_arg, "windows-32-7sp0") == 0) {
-        profile = "Win7SP0x86";
-    } else if (strcasecmp(profile_arg, "windows-64-7sp1") == 0) {
-        profile = "Win7SP1x64";
-    } else if (strcasecmp(profile_arg, "windows-32-7sp1") == 0) {
-        profile = "Win7SP1x86";
-    } else if (strcasecmp(profile_arg, "windows-64-81sp0") == 0) {
-        profile = "Win81U1x64";
-    } else if (strcasecmp(profile_arg, "windows-32-81sp0") == 0) {
-        profile = "Win81U1x86";
-    } else if (strcasecmp(profile_arg, "windows-64-8sp0") == 0) {
-        profile = "Win8SP0x64";
-    } else if (strcasecmp(profile_arg, "windows-32-8sp0") == 0) {
-        profile = "Win8SP0x86";
-    } else if (strcasecmp(profile_arg, "windows-64-8sp1") == 0) {
-        profile = "Win8SP1x64";
-    } else if (strcasecmp(profile_arg, "windows-32-8sp1") == 0) {
-        profile = "Win8SP1x86";
-    } else if (strcasecmp(profile_arg, "windows-64-xpsp1") == 0) {
-        profile = "WinXPSP1x64";
-    } else if (strcasecmp(profile_arg, "windows-64-xpsp2") == 0) {
-        profile = "WinXPSP2x64";
-    } else if (strcasecmp(profile_arg, "windows-32-xpsp2") == 0) {
-        profile = "WinXPSP2x86";
-    } else if (strcasecmp(profile_arg, "windows-32-xpsp3") == 0) {
-        profile = "WinXPSP3x86";
-    }
-    if (!profile) {
-        fprintf(stderr, "[%s] Unrecognized profile\n", __FILE__);
         return false;
     }
 
-    char* socket_path = (char*)calloc(512, 1);
-    if (!socket_path) {
-        fprintf(stderr, "[%s] Failed to allocate memory for socket path\n", __FILE__);
+    // make sure we are on Windows
+    if (panda_os_familyno != OS_WINDOWS) {
+        fprintf(stderr, "[%s] Currently, only Windows is supported.\n", __FILE__);
         return false;
     }
-    sprintf(socket_path, SOCKET_PATH_FMT, getpid());
-    strncat(g_location, socket_path, sizeof(g_location) - 1);
 
     const char* python_script = panda_parse_string(vol_args, "script", g_script_path);
 
-    strncpy(g_profile, profile, sizeof(g_profile) - 1);
     panda_free_args(vol_args);
 
     panda_cb pcb;
@@ -403,7 +463,7 @@ bool init_plugin(void* self)
 
     // This hack can be avoided by working with PANDA
     // to expose the python shared library
-    dlopen("libpython2.7.so", RTLD_LAZY | RTLD_GLOBAL);
+    dlopen("libpython3.8.so", RTLD_LAZY | RTLD_GLOBAL);
 
     char* script_contents = read_script(python_script);
     if (!script_contents) {
@@ -411,15 +471,28 @@ bool init_plugin(void* self)
         return false;
     }
 
-    Py_SetProgramName(g_program_name);
-    Py_Initialize();
+    std::string exec_path;
+    try {
+        exec_path = find_python3_on_path();
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[%s] %s\n", __FILE__, e.what());
+        free(script_contents);
+        return false;
+    }
+    std::wstring w_exec(exec_path.begin(), exec_path.end());
+
+    PyImport_AppendInittab("pandamem", PyInit_pandamem);
+    Py_SetProgramName((wchar_t*) g_program_name);
+    PyConfig_InitPythonConfig(&config);
+    PyConfig_SetString(&config, &config.executable, w_exec.c_str());
+    Py_InitializeFromConfig(&config);
 
     // Load the program as a code object
-    pcode = Py_CompileString((char*)script_contents, "volglue.py", Py_file_input);
+    pcode = Py_CompileString(script_contents, "volglue.py", Py_file_input);
     CHECK_OR_DIE(pcode, "Failed to compile python program!\n", cleanup);
 
     // Load the code object into a module
-    pmodule = PyImport_ExecCodeModule(g_module_name, pcode);
+    pmodule = PyImport_ExecCodeModule("gluemod", pcode);
     CHECK_OR_DIE(pmodule, "Failed to load as module!\n", cleanup);
 
     // Extract the entry point of our new module
@@ -432,11 +505,6 @@ bool init_plugin(void* self)
     }
 
     fprintf(stdout, "Successfully initialized python routines.\n");
-
-    if (!start_memory_server(socket_path)) {
-        fprintf(stderr, "[%s] Failed to start memory server!\n", __FILE__);
-        goto cleanup;
-    }
 
     if (script_contents) {
         free(script_contents);
@@ -451,8 +519,6 @@ bool init_plugin(void* self)
         goto cleanup;
     }
 
-    // temporary -- forcing to be windows specific so i don't have to edit any more code
-    // in this plugin
     g_os_manager = std::dynamic_pointer_cast<Windows7IntrospectionManager>(os_manager);
 
     return true;
@@ -468,14 +534,17 @@ cleanup:
     pmodule = NULL;
     Py_XDECREF(g_pfunc);
     g_pfunc = NULL;
+    PyConfig_Clear(&config);
+    unlink("mem.ram");
     return false;
 }
 
 void uninit_plugin(void* self)
 {
-    stop_memory_server();
     Py_XDECREF(g_pfunc);
     g_pfunc = NULL;
+    PyConfig_Clear(&config);
     Py_Finalize();
     teardown_avro();
+    unlink("mem.ram");
 }
