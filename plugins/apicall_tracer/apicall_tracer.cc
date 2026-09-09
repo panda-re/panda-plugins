@@ -547,10 +547,10 @@ void uninit_plugin(void* self)
     if (!g_initialized) {
         // create output file
         std::fstream results;
-	results.open(g_database_path,
+	    results.open(g_database_path,
 		     std::fstream::in | std::fstream::out | std::fstream::trunc);
         results.close();
 	throw std::runtime_error(
-            "panda introspection never initialized. Corrupted recording?");
+        "panda introspection never initialized. Corrupted recording?");
     }
 }
