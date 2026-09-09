@@ -388,6 +388,18 @@ void register_panda_callbacks(void* self) {
 
 bool init_plugin(void* self)
 {
+    // Read arguments
+    if (!panda_os_name) {
+        fprintf(stderr, "[%s] The -os <profile> flag is required\n", __FILE__);
+        return false;
+    }
+
+    // make sure we are on Windows
+    if (panda_os_familyno != OS_WINDOWS) {
+        fprintf(stderr, "[%s] Currently, only Windows is supported.\n", __FILE__);
+        return false;
+    }
+    
     panda_require("syscalls2");
     panda_enable_precise_pc();
 
