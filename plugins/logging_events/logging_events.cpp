@@ -65,12 +65,13 @@ bool initialize_globals(CPUState* env)
 
 struct ReportEventRecord {
     uint64_t asid;
+    uint64_t pid;
     std::string proc;
     std::vector<std::string> strings;
 };
 
 static std::vector<ReportEventRecord> g_report_events;
-static const char* REPORT_EVENTS_JSON_PATH = "logging_events.json";
+char* output_path;
 
 static std::string json_escape(const std::string& s) {
     std::string out;
@@ -107,6 +108,7 @@ static void write_report_events_json(const char* path) {
         const ReportEventRecord& rec = g_report_events[i];
         fprintf(f, "  {\n");
         fprintf(f, "    \"asid\": \"0x%lx\",\n", (unsigned long)rec.asid);
+        fprintf(f, "    \"pid\": %lu,\n", (unsigned long)rec.pid);
         fprintf(f, "    \"proc\": \"%s\",\n", json_escape(rec.proc).c_str());
         fprintf(f, "    \"strings\": [");
         for (size_t j = 0; j < rec.strings.size(); j++) {
@@ -165,15 +167,18 @@ void report_event_hook(CPUState* env, TranslationBlock* tb, struct hook* h) {
     fprintf(stdout, "[REPORT EVENT HOOK]\n");
 
     const char* proc_name = "<unknown>";
+    uint64_t pid = 0;
     struct WindowsProcess* process = kosi_get_current_process(g_kernel_osi);
     if (process) {
         proc_name = process_get_shortname(process);
+        pid = process_get_pid(process);
     }
     uint64_t asid = (uint64_t) panda_current_asid(env);
-    printf("asid: 0x%lx, proc: %s\n", asid, proc_name);
+    printf("asid: 0x%lx, pid: %lu, proc: %s\n", asid, (unsigned long)pid, proc_name);
 
     ReportEventRecord record;
     record.asid = asid;
+    record.pid = pid;
     record.proc = proc_name;
     free_process(process);
 
@@ -400,6 +405,10 @@ bool init_plugin(void* self)
         return false;
     }
     
+    panda_arg_list* args = panda_get_args("logging_events");
+    output_path = strdup(panda_parse_string(args, "output", ""));
+    panda_free_args(args);
+
     panda_require("syscalls2");
     panda_enable_precise_pc();
 
@@ -412,5 +421,5 @@ bool init_plugin(void* self)
 }
 
 void uninit_plugin(void* self) {
-    write_report_events_json(REPORT_EVENTS_JSON_PATH);
+    write_report_events_json(output_path);
 }
