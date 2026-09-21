@@ -123,16 +123,28 @@ static void write_report_events_json(const char* path) {
     fclose(f);
 }
 
-// x64 calling convention: args 1-4 in RCX/RDX/R8/R9, args 5+ spill to the
-// stack past the 0x20 shadow space.
 // BOOL ReportEventA(HANDLE hEventLog, WORD wType, WORD wCategory,
 //     DWORD dwEventID, PSID lpUserSid, WORD wNumStrings,
 //     DWORD dwDataSize, LPCSTR *lpStrings, LPVOID lpRawData)
+//
+// x64 (Microsoft) calling convention: args 1-4 in RCX/RDX/R8/R9, args 5+
+// spill to the stack past the 0x20 shadow space -- so arg6 (wNumStrings)
+// lands at rsp+0x30 and arg8 (lpStrings) at rsp+0x40.
+//
+// i386 (stdcall) calling convention: every argument is caller-pushed onto
+// the stack in order, each occupying a 4-byte slot (WORD args are widened
+// to a full DWORD slot) -- so past the return address at esp+0x00, arg6
+// (wNumStrings) lands at esp+0x18 and arg8 (lpStrings) at esp+0x20.
 static void read_report_event_strings(CPUState* env, std::vector<std::string>* out_strings) {
     CPUX86State* regs = (CPUX86State*) env->env_ptr;
     target_ulong rsp = regs->regs[R_ESP];
+#if defined(TARGET_X86_64)
     target_ulong num_strings_addr = rsp + 0x30;  // arg6: wNumStrings
     target_ulong lp_strings_addr = rsp + 0x40;   // arg8: lpStrings
+#else
+    target_ulong num_strings_addr = rsp + 0x18;  // arg6: wNumStrings
+    target_ulong lp_strings_addr = rsp + 0x20;   // arg8: lpStrings
+#endif
 
     uint16_t num_strings = 0;
     panda_virtual_memory_read(env, num_strings_addr, (uint8_t*)&num_strings, sizeof(num_strings));
