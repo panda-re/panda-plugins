@@ -4,7 +4,7 @@ set(PLUGIN_TARGET "panda_${PANDA_PLUGIN_NAME}")
 # Set flags, build, and link the actual plugin
 add_definitions(-DNEED_CPU_H)
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
-set(LINK_LIBS ${PYTHON_LIBRARIES} -lavro liboffset libiohal libosi)
+set(LINK_LIBS liboffset libiohal libosi)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -std=c++11 -I${CMAKE_CURRENT_SOURCE_DIR}/../dependencies/panda-wrapper/panda/panda/plugins")
 set(SRC_FILES ${PANDA_PLUGIN_NAME}.cpp)
 

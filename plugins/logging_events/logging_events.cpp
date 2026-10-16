@@ -182,7 +182,7 @@ void report_event_hook(CPUState* env, TranslationBlock* tb, struct hook* h) {
     uint64_t pid = 0;
     struct WindowsProcess* process = kosi_get_current_process(g_kernel_osi);
     if (process) {
-        proc_name = process_get_shortname(process);
+        proc_name = process_get_cmdline(process);
         pid = process_get_pid(process);
     }
     uint64_t asid = (uint64_t) panda_current_asid(env);
@@ -270,11 +270,12 @@ static bool find_export_address(CPUState* env, const char* module_substr,
             auto in_memory_pe = init_mem_pe(module_list_get_osi(module_list), base, false);
 
             if (in_memory_pe && parse_exports(in_memory_pe)) {
-                size_t len = MAX_FUNCTION_PROTOTYPE_SIZE;
                 char fn_name[MAX_FUNCTION_PROTOTYPE_SIZE];
                 auto total = mem_pe_export_table_get_numberoffunctions(in_memory_pe);
 
                 for (uint32_t i = 0; i < total; i++) {
+                    // libosi sets len to 0 after a failed read; reset it on every pass
+                    size_t len = MAX_FUNCTION_PROTOTYPE_SIZE;
                     memset(fn_name, '\0', len);
                     if (mem_pe_export_table_get_name_by_table_idx(in_memory_pe, fn_name, &len, i) &&
                         strcmp(fn_name, func_name) == 0) {
@@ -424,7 +425,10 @@ bool init_plugin(void* self)
     panda_require("syscalls2");
     panda_enable_precise_pc();
 
-    assert(init_hooks_api());
+    if (!init_hooks_api()) {
+        fprintf(stderr, "[logging_events] could not load the hooks plugin API\n");
+        return false;
+    }
     __enable_hooking();
 
     register_panda_callbacks(self);
@@ -433,5 +437,12 @@ bool init_plugin(void* self)
 }
 
 void uninit_plugin(void* self) {
-    write_report_events_json(output_path);
+    if (output_path && *output_path) {
+        write_report_events_json(output_path);
+    }
+
+    if (!g_initialized) {
+        throw std::runtime_error(
+            "panda introspection never initialized. Corrupted recording?");
+    }
 }
