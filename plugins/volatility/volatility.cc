@@ -463,7 +463,7 @@ bool init_plugin(void* self)
 
     // This hack can be avoided by working with PANDA
     // to expose the python shared library
-    dlopen("libpython3.8.so", RTLD_LAZY | RTLD_GLOBAL);
+    dlopen("libpython3.12.so", RTLD_LAZY | RTLD_GLOBAL);
 
     char* script_contents = read_script(python_script);
     if (!script_contents) {
@@ -482,8 +482,9 @@ bool init_plugin(void* self)
     std::wstring w_exec(exec_path.begin(), exec_path.end());
 
     PyImport_AppendInittab("pandamem", PyInit_pandamem);
-    Py_SetProgramName((wchar_t*) g_program_name);
+
     PyConfig_InitPythonConfig(&config);
+    PyConfig_SetBytesString(&config, &config.program_name, g_program_name);
     PyConfig_SetString(&config, &config.executable, w_exec.c_str());
     Py_InitializeFromConfig(&config);
 
