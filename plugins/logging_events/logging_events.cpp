@@ -23,7 +23,7 @@ extern "C" {
 #include <cstdio>
 #include <cstring>
 #include <string>
-#include <unordered_set>
+#include <unordered_map>
 #include <vector>
 
 extern "C" {
@@ -44,6 +44,9 @@ static __add_hook_t __add_hook = nullptr;
 
 typedef void (*__enable_hooking_t)();
 static __enable_hooking_t __enable_hooking = nullptr;
+
+typedef void (*__disable_hooking_t)();
+static __disable_hooking_t __disable_hooking = nullptr;
 
 bool initialize_globals(CPUState* env)
 {
@@ -313,7 +316,25 @@ static bool find_export_address(CPUState* env, const char* module_substr,
     return found;
 }
 
-static std::unordered_set<target_ulong> g_report_event_hooked_asids;
+// Keyed on (asid, process create_time) rather than just asid: Windows can
+// reuse a freed CR3 for a brand-new process, which gets a different ASLR
+// base for advapi32.dll. Keying on asid alone would skip re-resolution for
+// that reused asid and leave the hook pointing at the previous process's
+// (now stale) address, silently missing the new process's ReportEventA
+// calls entirely.
+//
+// create_time (not the resolved address) is the cache key specifically so
+// the common case -- same asid, same process, called again from a later
+// asid_changed/DLL-mapped event -- stays cheap: process_createtime() only
+// needs the current WindowsProcess struct, not the full module-list walk
+// and PE export table parse that find_export_address does. Resolving the
+// export address unconditionally on every call (as a prior version of this
+// code did) made that expensive walk run on every context switch and every
+// DLL mapped system-wide, which is both the cause of a severe slowdown and,
+// almost certainly, the segfault from running that logic far more often
+// (including against processes mid-teardown) than it was ever exercised
+// before.
+static std::unordered_map<target_ulong, uint64_t> g_report_event_hooked_asids;
 
 bool register_hook(CPUState* env, target_ulong oldval, target_ulong newval) {
     if (!g_initialized) {
@@ -323,7 +344,17 @@ bool register_hook(CPUState* env, target_ulong oldval, target_ulong newval) {
     }
 
     target_ulong asid = panda_current_asid(env);
-    if (g_report_event_hooked_asids.count(asid)) {
+
+    struct WindowsProcess* process = kosi_get_current_process(g_kernel_osi);
+    if (!process) {
+        return false;
+    }
+    uint64_t create_time = process_createtime(process);
+    free_process(process);
+
+    auto it = g_report_event_hooked_asids.find(asid);
+    if (it != g_report_event_hooked_asids.end() && it->second == create_time) {
+        // Already hooked for this exact process incarnation.
         return false;
     }
 
@@ -348,7 +379,7 @@ bool register_hook(CPUState* env, target_ulong oldval, target_ulong newval) {
     h.context = NULL;
     __add_hook(&h);
 
-    g_report_event_hooked_asids.insert(asid);
+    g_report_event_hooked_asids[asid] = create_time;
     return false;
 }
 
@@ -376,7 +407,8 @@ bool init_hooks_api() {
     if (hooks != NULL){
         __enable_hooking = (__enable_hooking_t) dlsym(hooks, "enable_hooking");
         __add_hook = (__add_hook_t) dlsym(hooks, "add_hook");
-        if (__enable_hooking == NULL || __add_hook == NULL) {
+        __disable_hooking = (__disable_hooking_t) dlsym(hooks, "disable_hooking");
+        if (__enable_hooking == NULL || __add_hook == NULL || __disable_hooking == NULL) {
             return false;
         }
     } else {
@@ -440,7 +472,7 @@ void uninit_plugin(void* self) {
     if (output_path && *output_path) {
         write_report_events_json(output_path);
     }
-
+    __disable_hooking();
     if (!g_initialized) {
         throw std::runtime_error(
             "panda introspection never initialized. Corrupted recording?");
