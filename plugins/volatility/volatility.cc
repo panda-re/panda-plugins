@@ -51,6 +51,19 @@ bool g_targeted = true;
 static PyObject* g_pfunc = NULL;
 PyConfig config;
 
+// Thread state saved when init_plugin releases the GIL, so that other threads
+// (e.g. the vCPU thread) can acquire it and uninit_plugin can restore it.
+static PyThreadState* g_main_tstate = NULL;
+
+// RAII guard to hold the GIL for the current scope on any thread
+struct GILGuard {
+    PyGILState_STATE state;
+    GILGuard() : state(PyGILState_Ensure()) {}
+    ~GILGuard() { PyGILState_Release(state); }
+    GILGuard(const GILGuard&) = delete;
+    GILGuard& operator=(const GILGuard&) = delete;
+};
+
 #define CHECK_OR_DIE(_obj, _emsg, _elabel)                                               \
     do {                                                                                 \
         if (!_obj) {                                                                     \
@@ -159,6 +172,9 @@ int run_volatility_analysis(CPUState* env)
 {
     // Dump RAM at this moment
     panda_memsavep("mem.ram");
+
+    // This runs on a thread other than the one that initialized Python
+    GILGuard gil;
 
     // Convert global strings to python strings
     PyObject* pfilter_str = PyUnicode_FromString(g_filter_path);
@@ -522,6 +538,10 @@ bool init_plugin(void* self)
 
     g_os_manager = std::dynamic_pointer_cast<Windows7IntrospectionManager>(os_manager);
 
+    // Release the GIL held by this thread since initialization, so other
+    // threads can acquire it via PyGILState_Ensure.
+    g_main_tstate = PyEval_SaveThread();
+
     return true;
 
 cleanup:
@@ -542,10 +562,27 @@ cleanup:
 
 void uninit_plugin(void* self)
 {
+    // Reacquire the GIL (and the main thread state) released in init_plugin
+    if (g_main_tstate) {
+        PyEval_RestoreThread(g_main_tstate);
+        g_main_tstate = NULL;
+    }
+
     Py_XDECREF(g_pfunc);
     g_pfunc = NULL;
     PyConfig_Clear(&config);
-    Py_Finalize();
+
+    // Flush Python-side stdio, since we skip Py_Finalize() below.
+    PyRun_SimpleString("import sys\n"
+                       "sys.stdout.flush()\n"
+                       "sys.stderr.flush()\n");
+
+    // Py_Finalize() is intentionally not called: it hangs in
+    // threading._shutdown() when run on a different thread than the one
+    // that initialized Python. The OS reclaims the interpreter on exit.
+    fflush(stdout);
+    fflush(stderr);
+
     teardown_avro();
     unlink("mem.ram");
 }
