@@ -4,6 +4,7 @@
 #include "exec/cpu-defs.h"
 #include <memory>
 #include <vector>
+#include <string>
 
 enum ArgIoType { IN = 1, IN_OPT, INOUT, INOUT_OPT, OUT, OUT_OPT, UNKNOWN };
 

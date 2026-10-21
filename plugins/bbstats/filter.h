@@ -3,6 +3,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <cstdint>
 
 #ifndef INSTRUMENTATION_FILTER
 #define INSTRUMENTATION_FILTER

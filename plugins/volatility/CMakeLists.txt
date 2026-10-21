@@ -2,11 +2,16 @@ set(PANDA_PLUGIN_NAME "volatility")
 set(PLUGIN_TARGET "panda_${PANDA_PLUGIN_NAME}")
 
 # The volatility plugin requires linking against python
-find_package(PythonLibs 3.8 REQUIRED) 
+find_package(PythonLibs 3.12 REQUIRED)
 if (NOT PYTHONLIBS_FOUND)
 	message(FATAL_ERROR "Could not find python libraries. Is python-dev installed?")
 endif()
 include_directories(${PYTHON_INCLUDE_DIRS})
+
+# Resolve the directory containing libpython so the plugin can find it at
+# runtime even when it lives outside the standard linker search paths
+# (e.g. a pyenv/venv install).
+get_filename_component(PYTHON_LIBRARY_DIR ${PYTHON_LIBRARY} DIRECTORY)
 
 # Set flags, build, and link the actual plugin
 add_definitions(-DNEED_CPU_H)
@@ -34,6 +39,14 @@ add_i386_plugin(${PLUGIN_TARGET} SRC_FILES LINK_LIBS_I386)
 add_x86_64_plugin(${PLUGIN_TARGET} SRC_FILES LINK_LIBS_X86_64)
 add_dependencies(${PLUGIN_TARGET}-i386 ${TARGET_DEPS_I386})
 add_dependencies(${PLUGIN_TARGET}-x86_64 ${TARGET_DEPS_X86_64})
+
+foreach(_vol_plugin_target ${PLUGIN_TARGET}-i386 ${PLUGIN_TARGET}-x86_64)
+    get_target_property(_vol_existing_rpath ${_vol_plugin_target} INSTALL_RPATH)
+    set_target_properties(${_vol_plugin_target} PROPERTIES
+        INSTALL_RPATH "${_vol_existing_rpath}:${PYTHON_LIBRARY_DIR}"
+        BUILD_WITH_INSTALL_RPATH TRUE
+    )
+endforeach()
 
 install(FILES ${PANDA_PLUGIN_DIR_I386}/volglue.py DESTINATION lib/panda/i386)
 install(FILES ${PANDA_PLUGIN_DIR_X86_64}/volglue.py DESTINATION lib/panda/x86_64)
