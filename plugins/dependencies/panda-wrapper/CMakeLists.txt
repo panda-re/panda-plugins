@@ -35,7 +35,6 @@ ExternalProject_Add(panda-wrapped-ext
     ARGS
         --target-list=${PANDA_ARCHS}
         --enable-llvm
-        --with-llvm=/usr/lib/llvm-11
         --prefix=${CMAKE_INSTALL_PREFIX}
         --extra-cxxflags=${CMAKE_CXX_FLAGS}
         --extra-ldflags=${CMAKE_LD_FLAGS}

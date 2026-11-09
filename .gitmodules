@@ -3,4 +3,5 @@
 	url = https://github.com/panda-re/panda
 [submodule "plugins/dependencies/libosi"]
 	path = plugins/dependencies/libosi
-	url = https://github.com/panda-re/libosi
+	url = https://github.com/panda-re/libosi.git
+	branch = "load-profiles-from-json"

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <map>
 #include <utility>
+#include <cstdint>
 
 #include "filter.h"
 
