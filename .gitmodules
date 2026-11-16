@@ -4,4 +4,3 @@
 [submodule "plugins/dependencies/libosi"]
 	path = plugins/dependencies/libosi
 	url = https://github.com/panda-re/libosi
-
