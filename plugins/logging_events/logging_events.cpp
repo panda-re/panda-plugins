@@ -22,8 +22,8 @@ extern "C" {
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <set>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 extern "C" {
@@ -44,9 +44,6 @@ static __add_hook_t __add_hook = nullptr;
 
 typedef void (*__enable_hooking_t)();
 static __enable_hooking_t __enable_hooking = nullptr;
-
-typedef void (*__disable_hooking_t)();
-static __disable_hooking_t __disable_hooking = nullptr;
 
 bool initialize_globals(CPUState* env)
 {
@@ -316,51 +313,40 @@ static bool find_export_address(CPUState* env, const char* module_substr,
     return found;
 }
 
-// Keyed on (asid, process create_time) rather than just asid: Windows can
-// reuse a freed CR3 for a brand-new process, which gets a different ASLR
-// base for advapi32.dll. Keying on asid alone would skip re-resolution for
-// that reused asid and leave the hook pointing at the previous process's
-// (now stale) address, silently missing the new process's ReportEventA
-// calls entirely.
-//
-// create_time (not the resolved address) is the cache key specifically so
-// the common case -- same asid, same process, called again from a later
-// asid_changed/DLL-mapped event -- stays cheap: process_createtime() only
-// needs the current WindowsProcess struct, not the full module-list walk
-// and PE export table parse that find_export_address does. Resolving the
-// export address unconditionally on every call (as a prior version of this
-// code did) made that expensive walk run on every context switch and every
-// DLL mapped system-wide, which is both the cause of a severe slowdown and,
-// almost certainly, the segfault from running that logic far more often
-// (including against processes mid-teardown) than it was ever exercised
-// before.
-static std::unordered_map<target_ulong, uint64_t> g_report_event_hooked_asids;
+// A freed CR3 can be reused by a new process whose advapi32 is at a different base, so a
+// process is identified by (asid, EPROCESS address) rather than by asid alone.
+static std::set<std::pair<target_ulong, uint64_t>> g_hooked_processes;
 
-bool register_hook(CPUState* env, target_ulong oldval, target_ulong newval) {
+// Hooks ReportEventA in the current process's advapi32 under the given asid. With
+// verify_asid, first checks that the current process is really the one for that asid:
+// asid_changed runs before CR3 is written, so the current process may still be the old one.
+static void hook_current_process(CPUState* env, target_ulong asid, bool verify_asid) {
     if (!g_initialized) {
         if (!initialize_globals(env)) {
-            return false;
+            return;
         }
     }
 
-    target_ulong asid = panda_current_asid(env);
-
-    struct WindowsProcess* process = kosi_get_current_process(g_kernel_osi);
-    if (!process) {
-        return false;
+    uint64_t eprocess = kosi_get_current_process_address(g_kernel_osi);
+    if (eprocess == 0 || g_hooked_processes.count({asid, eprocess})) {
+        return;
     }
-    uint64_t create_time = process_createtime(process);
-    free_process(process);
 
-    auto it = g_report_event_hooked_asids.find(asid);
-    if (it != g_report_event_hooked_asids.end() && it->second == create_time) {
-        // Already hooked for this exact process incarnation.
-        return false;
+    if (verify_asid) {
+        struct WindowsProcess* process = kosi_get_current_process(g_kernel_osi);
+        if (!process) {
+            return;
+        }
+        bool matches = (process_get_asid(process) & ~0xfffULL) == (asid & ~0xfffULL);
+        free_process(process);
+        if (!matches) {
+            return;
+        }
     }
 
     target_ulong address = 0;
     if (!find_export_address(env, "advapi32.dll", "ReportEventA", &address)) {
-        return false;
+        return;
     }
 
     struct symbol sym = {0};
@@ -379,7 +365,11 @@ bool register_hook(CPUState* env, target_ulong oldval, target_ulong newval) {
     h.context = NULL;
     __add_hook(&h);
 
-    g_report_event_hooked_asids[asid] = create_time;
+    g_hooked_processes.insert({asid, eprocess});
+}
+
+bool on_asid_changed(CPUState* env, target_ulong oldval, target_ulong newval) {
+    hook_current_process(env, newval, true);
     return false;
 }
 
@@ -395,7 +385,7 @@ bool register_hook(CPUState* env, target_ulong oldval, target_ulong newval) {
 void on_dll_mapped_hook(CPUState* env, target_ulong pc, target_ulong SectionHandle, target_ulong ProcessHandle,
         target_ulong BaseAddress, target_ulong ZeroBits, target_ulong CommitSize, target_ulong SectionOffset,
         target_ulong ViewSize, uint32_t InheritDisposition, uint32_t AllocationType, uint32_t Win32Protect) {
-    register_hook(env, 0, 0);
+    hook_current_process(env, panda_current_asid(env), false);
 }
 
 bool init_hooks_api() {
@@ -407,8 +397,7 @@ bool init_hooks_api() {
     if (hooks != NULL){
         __enable_hooking = (__enable_hooking_t) dlsym(hooks, "enable_hooking");
         __add_hook = (__add_hook_t) dlsym(hooks, "add_hook");
-        __disable_hooking = (__disable_hooking_t) dlsym(hooks, "disable_hooking");
-        if (__enable_hooking == NULL || __add_hook == NULL || __disable_hooking == NULL) {
+        if (__enable_hooking == NULL || __add_hook == NULL) {
             return false;
         }
     } else {
@@ -427,7 +416,7 @@ void register_panda_callbacks(void* self) {
     // must be re-resolved whenever we land on a new process rather than once
     // at load time -- retried on every asid change until advapi32.dll is
     // actually mapped and the export is found.
-    pcb.asid_changed = register_hook;
+    pcb.asid_changed = on_asid_changed;
     panda_register_callback(self, PANDA_CB_ASID_CHANGED, pcb);
 
     // Closes the install-before-call race: catches the moment advapi32.dll
@@ -472,7 +461,7 @@ void uninit_plugin(void* self) {
     if (output_path && *output_path) {
         write_report_events_json(output_path);
     }
-    __disable_hooking();
+
     if (!g_initialized) {
         throw std::runtime_error(
             "panda introspection never initialized. Corrupted recording?");
