@@ -19,6 +19,8 @@
 static std::map<std::string, uint64_t> linux_system_asid_lookup = {
     {"debian-32-8.11", 0x175c000},
     {"debian-64-8.11", 0x1812000},
+    {"linux-32-3.16", 0x175c000},
+    {"linux-64-3.16", 0x1812000},
 };
 
 /**
